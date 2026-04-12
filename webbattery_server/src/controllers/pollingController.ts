@@ -795,3 +795,59 @@ export const startBatchPollingController = async (req: Request, res: Response) =
 };
 
 // 恢复缓冲数据控制
+
+// 设备发现扫描 (扫描 1-24)
+export const scanDevicesController = async (req: Request, res: Response) => {
+  try {
+    const { deviceId } = req.body;
+    
+    if (!deviceId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: '设备ID不能为空' 
+      });
+    }
+    
+    // 检查设备连接状态
+    if (!shouldEnablePolling()) {
+      return res.status(400).json({
+        success: false,
+        message: '扫描功能已禁用：没有连接的设备'
+      });
+    }
+    
+    // 检查设备是否连接
+    const connections = getClientConnections();
+    const connection = connections.find(conn => 
+      (conn.connectionId === deviceId || conn.id === deviceId) && conn.isConnected
+    );
+    
+    if (!connection) {
+      return res.status(404).json({ 
+        success: false, 
+        message: '设备未连接或不存在' 
+      });
+    }
+    
+    const connectionId = connection.connectionId || connection.id;
+    console.log(`🔍 开始扫描设备: ConnectionID=${connectionId}`);
+    
+    // 从 pollingService 获取 scanOnlineDevices
+    const { scanOnlineDevices } = await import('../services/pollingService');
+    const result = await scanOnlineDevices(connectionId);
+    
+    res.json({ 
+      success: true, 
+      message: '设备扫描已启动并完成', 
+      data: result
+    });
+    
+  } catch (error) {
+    console.error('设备扫描失败:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: '设备扫描失败', 
+      error: error instanceof Error ? error.message : String(error) 
+    });
+  }
+};

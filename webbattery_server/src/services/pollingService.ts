@@ -156,6 +156,27 @@ export const readDeviceData = async (connectionId: string, targetUnitId: number 
   }
 };
 
+// 静默读取设备数据 (0x0000-0x0007) — 仅用于扫描
+// 与 readDeviceData 的区别：不调用 sendDataToFrontend()，不写 deviceStates 缓存
+// 这样扫描 128 个 UID 时不会向前端发送 batteryUpdate 事件，也不会污染数据表格
+const readDeviceDataSilently = async (connectionId: string, targetUnitId: number): Promise<boolean> => {
+  try {
+    const txId = getNextTransactionId();
+    const dataBuffer = await readHoldingRegistersWithFixedTxId(connectionId, txId, REGISTERS.DATA_START, REGISTERS.DATA_COUNT, targetUnitId);
+    
+    // 只要收到 16 字节（8 个寄存器 × 2 字节）就认为在线
+    if (dataBuffer && dataBuffer.length >= 16) {
+      const voltage = dataBuffer.readUInt16BE(0);
+      const statusRegister = dataBuffer.readUInt16BE(10);
+      console.log(`🔍 [Scan] Unit ${targetUnitId}: 在线 (V=${voltage}, Status=0x${statusRegister.toString(16)})`);
+      return true;
+    }
+    return false;
+  } catch (error) {
+    return false;
+  }
+};
+
 // 获取所有连接设备的数据
 export const getAllDevicesData = async (): Promise<DeviceData[]> => {
   const connections = getClientConnections();
@@ -181,6 +202,62 @@ export const getAllDevicesData = async (): Promise<DeviceData[]> => {
   
   return results;
 };
+
+// 扫描 1-24 设备是否在线
+export const scanOnlineDevices = async (connectionId: string): Promise<{
+  onlineDevices: number[];
+  totalScanned: number;
+}> => {
+  const onlineDevices: number[] = [];
+  const io = getSocketIOInstance();
+  
+  console.log(`🔍 [Scan] 开始扫描连接 ${connectionId} 的所有设备 (1-24)`);
+  
+  // 发送开始事件
+  io.emit('deviceScanStarted', { connectionId, total: 24 });
+  
+  for (let unitId = 1; unitId <= 24; unitId++) {
+    try {
+      // 通过静默读取判断是否在线（不触发 batteryUpdate 事件）
+      const isOnline = await readDeviceDataSilently(connectionId, unitId);
+      if (isOnline) {
+        onlineDevices.push(unitId);
+      }
+      
+      // 实时发送进度
+      io.emit('deviceScanProgress', { 
+        connectionId,
+        unitId, 
+        online: isOnline, 
+        progress: unitId, 
+        total: 24 
+      });
+      
+    } catch (error) {
+      io.emit('deviceScanProgress', { 
+        connectionId,
+        unitId, 
+        online: false, 
+        progress: unitId, 
+        total: 24 
+      });
+    }
+    
+    // 短暂延时，避免瞬间发包过多导致拥塞
+    await new Promise(r => setTimeout(r, 10));
+  }
+  
+  console.log(`✅ [Scan] 扫描完成。发现 ${onlineDevices.length} 个在线设备`);
+  
+  io.emit('deviceScanComplete', { 
+    connectionId,
+    onlineDevices, 
+    totalScanned: 24 
+  });
+  
+  return { onlineDevices, totalScanned: 24 };
+};
+
 
 // 获取单个设备数据
 export const getDeviceData = async (connectionId: string): Promise<DeviceData | null> => {
@@ -393,6 +470,7 @@ interface PollingTimer {
   readTimer?: NodeJS.Timeout; // F1测试用的读取定时器
   type: 'F1' | 'F2';
   connectionId: string;
+  targetUnitId?: number; // F2测试目标设备地址
   startTime: number;
   readCount?: number; // F2测试用
   controller?: { active: boolean }; // 用于控制异步循环停止
@@ -501,10 +579,16 @@ export const startF1CyclicPolling = async (
       return false;
     }
     
-    // 假设每个连接有 128 个从机 (Unit 1-128)
-    const unitIds = Array.from({length: 128}, (_, i) => i + 1);
+    // 如果传入了目标设备列表，只轮询这些设备；否则轮询全部 24 个从机
+    const unitIds = (targetDevices && targetDevices.length > 0)
+      ? targetDevices.map(Number).filter(n => n >= 1 && n <= 24)
+      : Array.from({length: 24}, (_, i) => i + 1);
+    
+    if (targetDevices && targetDevices.length > 0) {
+      console.log(`📋 [F1] 使用目标设备列表: [${unitIds.join(', ')}] (共 ${unitIds.length} 个)`);
+    }
 
-    console.log(`🔄 [F1 Start] 周期:${periodSeconds}s, Conn:${connectionId}, Units:1-128`);
+    console.log(`🔄 [F1 Start] 周期:${periodSeconds}s, Conn:${connectionId}, Units:1-24`);
 
     // 0. 初始恢复检查
     console.log(`Running initial recovery check...`);
@@ -630,11 +714,11 @@ export const startF2FastPolling = async (connectionId: string, targetUnitId: num
     
     console.log(`🚀 启动F2快速轮询 ${connectionId}: 写0x0001=1, 目标设备=${targetUnitId}, 每0.5s读取一次, 共60次`);
     
-    // 1. 发送F2启动命令 (写 0x0001 = 1)
+    // 1. 发送F2启动命令 (写 0x0001 = 1 到 CONTROL_A 0x0006)
     const txId = getNextTransactionId();
     // 使用 targetUnitId 发送启动命令，而不是广播
     await writeSingleRegisterWithFixedTxId(connectionId, txId, REGISTERS.CONTROL_A, 0x0001, targetUnitId);
-    console.log(`✅ F2启动命令已发送 ${connectionId} (UnitID=${targetUnitId})`);
+    console.log(`✅ F2启动命令已发送 ${connectionId} (UnitID=${targetUnitId}, Reg=0x0006, Val=1)`);
     
     const startTime = Date.now();
     let readCount = 0;
@@ -681,6 +765,7 @@ export const startF2FastPolling = async (connectionId: string, targetUnitId: num
       timer,
       type: 'F2',
       connectionId,
+      targetUnitId,
       startTime,
       readCount: 0
     });
@@ -712,12 +797,13 @@ export const stopPolling = (connectionId: string): boolean => {
          }
        });
     } else if (pollingInfo.type === 'F2') {
-       // F2 停止命令: 写 0x0001 = 0x0002 (强制停止)
+       // F2 停止命令: 写 0x0000 到 CONTROL_A 0x0006 以停止测试 (针对特定 targetUnitId)
        const connections = getClientConnections();
        connections.forEach(conn => {
          if (conn.isConnected) {
             const txId = getNextTransactionId();
-            writeSingleRegisterWithFixedTxId(conn.id, txId, REGISTERS.CONTROL_A, 0x0002)
+            const targetUnitId = pollingInfo.targetUnitId;
+            writeSingleRegisterWithFixedTxId(conn.id, txId, REGISTERS.CONTROL_A, 0x0000, targetUnitId)
               .catch(e => console.error(`F2停止命令发送失败 ${conn.id}:`, e));
          }
        });
@@ -760,6 +846,15 @@ export const getPollingStatus = (): Array<{connectionId: string, type: 'F1' | 'F
     });
   }
   return status;
+};
+
+// 获取F2测试当前目标设备地址
+export const getF2TargetUnitId = (connectionId: string): number | undefined => {
+  const pollingInfo = pollingTimers.get(connectionId);
+  if (!pollingInfo || pollingInfo.type !== 'F2') {
+    return undefined;
+  }
+  return pollingInfo.targetUnitId;
 };
 
 // 批量轮询：对所有连接的设备启动轮询

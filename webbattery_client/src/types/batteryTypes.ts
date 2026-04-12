@@ -52,16 +52,14 @@ export interface BatteryData {
   statusBits?: {
     measEnable: boolean;      // bit0: 表示测试已启动，无论是否正在采样
     measRunning: boolean;     // bit1: 当前测试正在执行中（如采样/计算进行中）
-    cooldownLocked: boolean;  // bit2: F2测试冷却保护标志，冷却保护时间30秒
-    alarmDevOv: boolean;      // bit3: 检测设备供电异常标志
-    alarmCell1Ov: boolean;    // bit4: 电池电压超出4.5V上限标志
-    alarmCell1Uv: boolean;    // bit5: 电池电压低于0.2V下限标志
-    commTimeout: boolean;     // bit6: F1模式中充放电机超过设定周期+30s未发生通讯，自动停止并标志为1
-    testDone: boolean;        // bit7: F2测试完成标志
-    forceStopped: boolean;    // bit8: 被充放电机强行中止标志
-    dataReady: boolean;       // bit9: F1采样数据更新标志，可作为充放电机数据同步时钟戳
-    commError: boolean;       // bit10: 检测设备收到的写入命令错误时置1，收到的写入命令正确时清0
-    address: number;          // bit11-14: 地址寄存器 (1-12)
+    alarmDevOv: boolean;      // bit2: 检测设备供电异常标志
+    alarmCell1Ov: boolean;    // bit3: 电池电压超出4.5V上限标志
+    alarmCell1Uv: boolean;    // bit4: 电池电压低于0.2V下限标志
+    commTimeout: boolean;     // bit5: F1模式中充放电机未按时读取超时事件
+    forceStopped: boolean;    // bit6: 被充放电机强行中止标志
+    dataReady: boolean;       // bit7: F1采样数据更新标志，可作为充放电机数据同步时钟戳
+    commError: boolean;       // bit8: 检测设备收到的写入命令错误时置1，收到的写入命令正确时清0
+    address: number;          // bit9-15: 地址寄存器 (1-24)
     rawValue: number;
     binaryString: string;
   };
