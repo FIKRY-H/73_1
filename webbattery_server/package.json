@@ -1,0 +1,56 @@
+{
+  "name": "webbattery_server",
+  "version": "1.0.0",
+  "main": "dist/index.js",
+  "bin": "dist/index.js",
+  "scripts": {
+    "start": "node dist/index.js",
+    "dev": "nodemon --watch src --exec ts-node src/index.ts",
+    "build": "tsc",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "pkg-build": "npm run build && pkg .",
+    "nexe-build": "npm run build && nexe dist/index.js -o ../build/webbattery_server.exe -t windows-x64-16.16.0 --verbose"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "Battery monitoring server based on V9 project",
+  "nexe": {
+    "target": "windows-x64-16.16.0",
+    "output": "../build/webbattery_server.exe",
+    "build": true
+  },
+  "pkg": {
+    "targets": [
+      "node18-win-x64"
+    ],
+    "outputPath": "../build",
+    "scripts": [
+      "dist/**/*.js"
+    ]
+  },
+  "dependencies": {
+    "axios": "^1.10.0",
+    "express": "^4.18.2",
+    "modbus-serial": "^8.0.16",
+    "socket.io": "^4.7.2",
+    "socket.io-client": "^4.7.2",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^5.1.6",
+    "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "@angablue/exe": "^3.2.5",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.10.0",
+    "@types/socket.io": "^3.0.2",
+    "@types/sqlite3": "^3.1.11",
+    "@types/uuid": "^10.0.0",
+    "@vercel/ncc": "^0.38.3",
+    "nexe": "^5.0.0-beta.4",
+    "nodemon": "^3.0.1",
+    "pkg": "^5.8.1",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.8.3"
+  }
+}
