@@ -49,6 +49,11 @@ WebBattery 是一个专业的电池监控与测试上位机软件，基于 B/S �
    - 确保已安装 Node.js 环境。
    - 运行根目录下的 `start.bat` 脚本可尝试自动启动。
 
+### 协议升级最小回归
+- 快速执行：`npm run regression:protocol`
+- 含构建校验：`npm run regression:protocol:build`
+- 详细步骤文档：`PROTOCOL_UPGRADE_REGRESSION.md`
+
 ### 界面操作
 > ![设备连接配置截图](assets/connection_config.png)
 > *（请将连接配置截图命名为 connection_config.png 并放入 assets 文件夹）*

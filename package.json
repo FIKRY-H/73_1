@@ -7,6 +7,8 @@
     "test": "node comprehensive_test_suite.js",
     "test:comprehensive": "node comprehensive_test_suite.js",
     "test:quick": "node quick_test.js",
+    "regression:protocol": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/protocol_regression_check.ps1",
+    "regression:protocol:build": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/protocol_regression_check.ps1 -RunBuild",
     "start-devices": "node start_device_simulators.bat",
     "auto-fix": "node auto_bug_fixer.js",
     "build": "cd webbattery_server && npm run build && cd ../webbattery_client && npm run build",
