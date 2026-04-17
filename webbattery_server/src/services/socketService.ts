@@ -1,12 +1,10 @@
 import { Server as SocketIOServer, Socket } from 'socket.io';
 import { ClientConnection, FrameType } from '../models/batteryModel';
-import { 
-  saveBatteryData,
-  getDeviceNumberByMac,
+import {
   processTestData
 } from './batteryService';
 // 仅使用Modbus TCP协议
-import { 
+import {
   modbusEvents,
   getClientConnections as getModbusConnections,
   getConnectionStatus as getModbusStatus,
@@ -17,11 +15,10 @@ import {
   sendModbusCommand,
   broadcastModbusCommand
 } from './modbusService';
-import { 
+import {
   getAllDevicesData,
   getDeviceData,
   startF1CyclicTest,
-  startF2FastTest,
   startF2FastPolling,
   startF1CyclicPolling,
   stopPolling,
@@ -34,7 +31,7 @@ import {
   readDeviceData,
   sendDataToFrontend
 } from './pollingService';
-import { COMMAND_MAP } from '../utils/modbusFrameUtils';
+import { COMMAND_MAP, STATUS_BITS } from '../utils/modbusFrameUtils';
 
 // Store connected clients
 const connectedClients = new Map<string, ClientConnection>();
@@ -50,6 +47,9 @@ declare global {
 const lastStatusSent = new Map<string, { [key: string]: number }>();
 const STATUS_SEND_INTERVAL = 100; // 1秒内不重复发送相同状态
 
+// 记录每个设备最近一次DATA_READY状态（用于状态可视化与调试）
+const lastDataReadyByDevice = new Map<string, boolean>();
+
 // 移除自动扫描配置
 
 // 优化状态发送函数
@@ -57,14 +57,14 @@ const sendStatusUpdate = (io: SocketIOServer, eventName: string, data: any, sock
   const now = Date.now();
   const key = `${eventName}_${socketId || 'broadcast'}`;
   const dataHash = JSON.stringify(data);
-  
+
   if (!lastStatusSent.has(key)) {
     lastStatusSent.set(key, {});
   }
-  
+
   const lastSent = lastStatusSent.get(key)!;
   const lastTime = lastSent[dataHash] || 0;
-  
+
   if (now - lastTime > STATUS_SEND_INTERVAL) {
     if (socketId) {
       const socket = io.sockets.sockets.get(socketId);
@@ -85,12 +85,12 @@ const sendStatusUpdate = (io: SocketIOServer, eventName: string, data: any, sock
 // Socket.IO server initialization
 export const initializeSocketServer = (io: SocketIOServer): void => {
   console.log('初始化Socket.IO服务器...');
-  
+
   // 初始化全局变量
   if (!global.f1PollingTimers) {
     global.f1PollingTimers = new Map();
   }
-  
+
   // 清理所有全局定时器的函数
   const clearAllGlobalTimers = () => {
     console.log('清理所有全局F1轮询定时器...');
@@ -104,7 +104,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
       global.f1PollingTimers.clear();
     }
   };
-  
+
   // 清理单个连接的全局定时器
   const clearGlobalTimer = (connectionId: string) => {
     if (global.f1PollingTimers && global.f1PollingTimers.has(connectionId)) {
@@ -123,7 +123,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
     // Handle client registration
     socket.on('register', (data: { mac: string, ipAddress: string, port: number }) => {
       const { mac, ipAddress, port } = data;
-      
+
       const clientConnection: ClientConnection = {
         clientId: socket.id,
         ipAddress,
@@ -161,33 +161,33 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
 
         // 获取MAC地址：优先从Modbus连接中获取，确保与周期测试使用相同的MAC地址
         let mac = socket.data.mac || 'unknown';
-        
+
         // 如果Socket没有MAC地址，尝试从Modbus连接中获取
         if (mac === 'unknown') {
           const clientIp = socket.handshake.address?.replace(/^::ffff:/, '') || socket.conn.remoteAddress?.replace(/^::ffff:/, '');
-          console.log(`🔍 Socket客户端IP: ${clientIp}`);
-          
+          console.log(`Socket客户端IP: ${clientIp}`);
+
           if (clientIp) {
             // 查找对应的Modbus连接
             const modbusConnections = getModbusConnections();
-            const matchingConnection = modbusConnections.find(conn => 
-              conn.host === clientIp || 
+            const matchingConnection = modbusConnections.find(conn =>
+              conn.host === clientIp ||
               conn.host === '127.0.0.1' && (clientIp === '127.0.0.1' || clientIp === 'localhost') ||
               conn.host === 'localhost' && (clientIp === '127.0.0.1' || clientIp === 'localhost')
             );
-            
+
             if (matchingConnection && matchingConnection.mac) {
               mac = matchingConnection.mac;
               // 将MAC地址存储到socket中，避免重复查找
               socket.data.mac = mac;
-              console.log(`✅ 从Modbus连接获取MAC地址: ${mac} (IP: ${clientIp})`);
+              console.log(`从Modbus连接获取MAC地址: ${mac} (IP: ${clientIp})`);
             } else {
-              console.log(`⚠️ 未找到对应的Modbus连接，使用IP作为标识: ${clientIp}`);
+              console.log(`未找到对应的Modbus连接，使用IP作为标识: ${clientIp}`);
               mac = clientIp || 'unknown';
             }
           }
         }
-        
+
         // Process test data using unified function
         const processedData = await processTestData(mac, hexValues, testType);
 
@@ -197,7 +197,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
           // 注意：数据保存已在pollingService.ts的sendDataToFrontend函数中处理
           // 这里不再重复保存，避免数据重复
           // await saveBatteryData(processedData.data);
-          
+
           // 始终发送寄存器状态到前端
           if (processedData.data.status !== undefined) {
             // 兼容对象或数字两种格式，统一为原始数值
@@ -215,37 +215,37 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
               isRegisterUpdate: true
             });
           }
-          
-          // 根据测试类型决定是否过滤DATA_READY位
+
+          // 根据测试类型决定是否广播
+          // F1(周期): 仅DATA_READY=1时广播
+          // F2(快速): 不再按DATA_READY过滤
           if (processedData.data.status !== undefined) {
             // processedData.data.status可能是对象或数字，需要兼容处理
             let dataReady = false;
             if (typeof processedData.data.status === 'object' && processedData.data.status && (processedData.data.status as any).dataReady !== undefined) {
               dataReady = (processedData.data.status as any).dataReady;
             } else if (typeof processedData.data.status === 'number') {
-              // 按RS485文档：DATA_READY位位于bit8
-              dataReady = (processedData.data.status & 0x0100) !== 0;
+              dataReady = (processedData.data.status & STATUS_BITS.DATA_READY) !== 0;
             }
-           
-           // 周期测试模式：无论dataready是否为1都广播数据
-           // 快速测试模式：只有dataready为1时才广播数据
-           const isCyclicTest = processedData.data.testType === FrameType.CyclicTest;
-           
-           if (isCyclicTest || dataReady) {
-             // Broadcast to all connected socket clients
-             io.emit('batteryUpdate', processedData.data);
-             if (isCyclicTest) {
-               console.log(`周期测试数据已广播 (DATA_READY=${dataReady ? 1 : 0})`);
-             } else {
-               console.log('快速测试数据已广播 (DATA_READY=1)');
-             }
-           } else {
-             console.log('⚠️ 快速测试模式且DATA_READY位为0，跳过测试数据广播');
-           }
-         } else {
-           console.log('⚠️ 状态寄存器未定义，跳过测试数据广播');
-         }
-          
+
+            const isCyclicTest = processedData.data.testType === FrameType.CyclicTest;
+            const shouldBroadcast = isCyclicTest ? dataReady : true;
+
+            if (shouldBroadcast) {
+              // Broadcast to all connected socket clients
+              io.emit('batteryUpdate', processedData.data);
+              if (isCyclicTest) {
+                console.log('周期测试数据已广播 (DATA_READY=1)');
+              } else {
+                console.log(`快速测试数据已广播 (DATA_READY=${dataReady ? 1 : 0})`);
+              }
+            } else {
+              console.log('周期测试模式且DATA_READY位为0，跳过测试数据广播');
+            }
+          } else {
+            console.log('⚠️ 状态寄存器未定义，跳过测试数据广播');
+          }
+
           console.log('测试数据已处理并广播');
         } else {
           console.error('测试数据处理失败:', processedData.error);
@@ -260,7 +260,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
     // 移除旧的batteryDataLegacy处理逻辑
 
     // 移除旧的executeCommand处理逻辑
-    
+
     // 移除旧的executeBatchCommands处理逻辑
 
     // 移除旧的readRegisters处理逻辑
@@ -279,7 +279,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
       try {
         const { host, port = 502, deviceId = 1 } = data;
         const connectionId = await createModbusClient(host, port, deviceId);
-        
+
         socket.emit('modbusConnectionResponse', {
           success: true,
           connectionId,
@@ -298,7 +298,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
       try {
         const { host, port = 502, deviceId = 1 } = data;
         const connectionId = await createModbusClient(host, port, deviceId);
-        
+
         socket.emit('modbusConnectionResponse', {
           success: true,
           connectionId,
@@ -316,7 +316,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
     socket.on('disconnectModbus', async (data: { connectionId: string }) => {
       try {
         await closeModbusClient(data.connectionId);
-        
+
         socket.emit('modbusDisconnectResponse', {
           success: true,
           message: 'Modbus连接已关闭'
@@ -334,7 +334,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
       try {
         const { connectionId, command, parameters = [] } = data;
         await sendModbusCommand(connectionId, command, parameters);
-        
+
         socket.emit('modbusCommandResponse', {
           success: true,
           message: 'Modbus命令发送成功'
@@ -352,10 +352,10 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
       try {
         const { command, parameters = [] } = data;
         const result = await broadcastModbusCommand(command, parameters);
-        
+
         const successCount = Object.values(result).filter(r => !(r instanceof Error)).length;
         const failedCount = Object.values(result).filter(r => r instanceof Error).length;
-        
+
         socket.emit('modbusBroadcastResponse', {
           success: true,
           message: `Modbus广播命令完成: 成功=${successCount}, 失败=${failedCount}`,
@@ -401,7 +401,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
         lastHeartbeat: conn.lastHeartbeat ? conn.lastHeartbeat.toISOString() : new Date().toISOString(),
         mac: conn.mac
       }));
-      
+
       console.log(`发送Modbus连接列表到 ${socket.id}:`, connectionList.length, '个连接', connectionList);
       sendStatusUpdate(io, 'modbusConnectionsUpdate', connectionList, socket.id);
     });
@@ -410,9 +410,9 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
     socket.on('getAllDevicesData', async () => {
       try {
         console.log('获取所有设备数据请求');
-        
+
         const devicesData = await getAllDevicesData();
-        
+
         socket.emit('allDevicesDataResponse', {
           success: true,
           data: devicesData,
@@ -432,9 +432,9 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
       try {
         const { connectionId } = data;
         console.log(`获取设备数据请求: ${connectionId}`);
-        
+
         const deviceData = await getDeviceData(connectionId);
-        
+
         socket.emit('deviceDataResponse', {
           success: true,
           connectionId,
@@ -456,16 +456,16 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
       try {
         const { connectionId, periodSeconds = 3 } = data; // 默认3秒间隔
         console.log(`启动F1周期测试: ${connectionId}, 周期: ${periodSeconds}秒`);
-        
+
         // 检查设备连接状态
         const connections = getModbusConnections();
         const activeConnections = connections.filter(conn => conn.isConnected);
         const deviceCount = activeConnections.length;
-        
-        console.log(`🔍 WebSocket F1测试设备数量检查: 当前连接${deviceCount}台设备`);
-        
+
+        console.log(`WebSocket F1测试设备数量检查: 当前连接${deviceCount}台设备`);
+
         if (deviceCount === 0) {
-          console.log(`❌ WebSocket F1测试启动被拒绝 ${connectionId}: 没有连接的设备`);
+          console.log(`WebSocket F1测试启动被拒绝 ${connectionId}: 没有连接的设备`);
           socket.emit('startF1CyclicTestResponse', {
             success: false,
             connectionId,
@@ -475,19 +475,19 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
           });
           return;
         }
-        
+
         // 直接启动F1轮询，不等待写命令响应
         console.log(`🚀 直接启动F1轮询 ${connectionId}: 周期=${periodSeconds}秒`);
-        
+
         // 启动F1轮询（包含写命令发送和立即开始轮询读取）
         const pollingStarted = await startF1CyclicPolling(connectionId, periodSeconds, undefined, 0x0001);
-        
+
         if (pollingStarted) {
-          console.log(`✅ F1周期轮询已启动 ${connectionId}: 周期=${periodSeconds}秒`);
+          console.log(`F1周期轮询已启动 ${connectionId}: 周期=${periodSeconds}秒`);
         } else {
-          console.error(`❌ F1周期轮询启动失败 ${connectionId}`);
+          console.error(`F1周期轮询启动失败 ${connectionId}`);
         }
-        
+
         socket.emit('startF1CyclicTestResponse', {
           success: pollingStarted,
           connectionId,
@@ -497,7 +497,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
           timestamp: new Date().toISOString()
         });
       } catch (error) {
-        console.error(`❌ F1周期测试启动失败 ${data.connectionId}:`, error);
+        console.error(`F1周期测试启动失败 ${data.connectionId}:`, error);
         socket.emit('startF1CyclicTestResponse', {
           success: false,
           connectionId: data.connectionId,
@@ -512,23 +512,23 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
     socket.on('startF2FastTest', async (data: { connectionId: string, targetUnitId?: number }) => {
       try {
         const { connectionId, targetUnitId } = data;
-        
+
         // 获取连接信息以确定设备ID
         const connections = getModbusConnections();
         const connection = connections.find(c => c.id === connectionId);
         // 优先使用传入的targetUnitId，其次使用连接的deviceId，最后默认为1
         const unitId = targetUnitId || connection?.deviceId || 1;
-        
+
         console.log(`启动F2快速测试: ${connectionId}, UnitID=${unitId}`);
-        
+
         // 检查设备连接状态
         const activeConnections = connections.filter(conn => conn.isConnected);
         const deviceCount = activeConnections.length;
-        
-        console.log(`🔍 WebSocket F2测试设备数量检查: 当前连接${deviceCount}台设备`);
-        
+
+        console.log(`WebSocket F2测试设备数量检查: 当前连接${deviceCount}台设备`);
+
         if (deviceCount === 0) {
-          console.log(`❌ WebSocket F2测试启动被拒绝 ${connectionId}: 没有连接的设备`);
+          console.log(`WebSocket F2测试启动被拒绝 ${connectionId}: 没有连接的设备`);
           socket.emit('startF2FastTestResponse', {
             success: false,
             connectionId,
@@ -537,13 +537,14 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
           });
           return;
         }
-        
-        const result = await startF2FastTest(connectionId, unitId);
-        
+
+        const result = await startF2FastPolling(connectionId, unitId);
+
         socket.emit('startF2FastTestResponse', {
-          success: true,
+          success: result,
           connectionId,
           result,
+          message: result ? 'F2快速测试已启动' : 'F2快速测试启动失败，请检查设备连接或冷却状态',
           timestamp: new Date().toISOString()
         });
       } catch (error) {
@@ -561,23 +562,23 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
       try {
         const { connectionId } = data;
         console.log(`停止测试: ${connectionId}`);
-        
+
         // 停止所有轮询（包括F1和F2）
         const { stopPolling } = await import('./pollingService');
         const pollingStopResult = stopPolling(connectionId);
         if (pollingStopResult) {
-          console.log(`⏹️ 轮询已停止 ${connectionId}`);
+          console.log(`轮询已停止 ${connectionId}`);
         }
-        
+
         // 删除寄存器监控停止代码，不再需要处理状态寄存器与控制寄存器
-        
+
         // 清理全局定时器
         clearGlobalTimer(connectionId);
-        
+
         // 注意：已移除F1等待响应机制，无需清理等待状态
-        
+
         const result = await stopTest(connectionId);
-        
+
         socket.emit('stopTestResponse', {
           success: true,
           connectionId,
@@ -600,7 +601,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
     socket.on('getDeviceStates', () => {
       try {
         const deviceStates = getDeviceStates();
-        
+
         socket.emit('deviceStatesUpdate', {
           deviceStates,
           timestamp: new Date().toISOString()
@@ -618,7 +619,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
     socket.on('clearDeviceStates', () => {
       try {
         clearDeviceStates();
-        
+
         socket.emit('clearDeviceStatesResponse', {
           success: true,
           message: '设备状态已清除',
@@ -637,10 +638,10 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
     socket.on('testNewProtocolFormat', () => {
       try {
         console.log('测试新协议格式请求');
-        
+
         const result = testNewProtocolFormat();
         updateReadStrategy();
-        
+
         socket.emit('testNewProtocolFormatResponse', {
           success: true,
           result,
@@ -661,14 +662,14 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
       try {
         const { devices } = data;
         console.log(`批量连接设备请求: ${devices.length} 个设备`);
-        
+
         const results = [];
-        
+
         for (const device of devices) {
           try {
             const { ip, port = 502, deviceId = 1 } = device;
             const connectionId = await createModbusClient(ip, port, deviceId);
-            
+
             results.push({
               ip,
               port,
@@ -687,7 +688,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
             });
           }
         }
-        
+
         socket.emit('batchConnectResponse', {
           success: true,
           message: `批量连接完成，成功: ${results.filter(r => r.success).length}/${results.length}`,
@@ -702,25 +703,25 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
     });
 
     // Handle command by identifier request
-    socket.on('sendCommandByIdentifier', async (data: { 
-      identifier: string, 
-      command: string, 
-      register?: number, 
-      value?: number, 
+    socket.on('sendCommandByIdentifier', async (data: {
+      identifier: string,
+      command: string,
+      register?: number,
+      value?: number,
       quantity?: number
     }) => {
       try {
         const { identifier, command, register, value, quantity } = data;
         console.log(`按标识符发送命令: ${identifier}, 命令: ${command}`);
-        
+
         // 使用Modbus协议处理
         const connections = getModbusConnections();
-        
+
         // 根据MAC或IP查找对应的连接
         const targetConnections = connections.filter(conn => {
           return conn.host === identifier || conn.mac === identifier;
         });
-        
+
         if (targetConnections.length === 0) {
           socket.emit('commandByIdentifierResponse', {
             success: false,
@@ -728,24 +729,24 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
           });
           return;
         }
-        
+
         const results = [];
-        
+
         for (const connection of targetConnections) {
           try {
             let result;
-            
+
             // 根据命令类型执行不同的操作
             switch (command) {
               case 'queryStatus':
                 result = await sendModbusCommand(connection.id, COMMAND_MAP.QUERY_STATUS, []);
                 break;
               default:
-                const commandCode = COMMAND_MAP[command as keyof typeof COMMAND_MAP] || 
-                                  (typeof command === 'string' ? parseInt(command, 16) : command);
+                const commandCode = COMMAND_MAP[command as keyof typeof COMMAND_MAP] ||
+                  (typeof command === 'string' ? parseInt(command, 16) : command);
                 result = await sendModbusCommand(connection.id, commandCode, [register, value, quantity].filter((x): x is number => x !== undefined));
             }
-            
+
             results.push({
               connectionId: connection.id,
               host: connection.host,
@@ -763,7 +764,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
             });
           }
         }
-        
+
         socket.emit('commandByIdentifierResponse', {
           success: true,
           message: `Modbus命令发送完成，成功: ${results.filter(r => r.success).length}/${results.length}`,
@@ -784,40 +785,41 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
     // Handle battery data update for testing
     socket.on('batteryDataUpdate', (data) => {
       console.log('收到测试电池数据:', data);
-      
+
       // 检查是否为寄存器状态更新，如果是则直接转发
       if (data.isRegisterUpdate) {
         io.emit('registerStatusUpdate', data);
         console.log('转发寄存器状态更新');
         return;
       }
-      
-      // 对于电池数据，检查DATA_READY位和测试类型
+
+      // 对于电池数据，根据测试类型应用不同门控策略
+      // F1(周期): 仅DATA_READY=1时转发
+      // F2(快速): 不再按DATA_READY过滤
       if (data.status !== undefined) {
         // data.status可能是对象或数字，需要兼容处理
         let dataReady = false;
         if (typeof data.status === 'object' && data.status && (data.status as any).dataReady !== undefined) {
           dataReady = (data.status as any).dataReady;
         } else if (typeof data.status === 'number') {
-          // 按RS485文档：DATA_READY位位于bit8
-          dataReady = (data.status & 0x0100) !== 0;
+          dataReady = (data.status & STATUS_BITS.DATA_READY) !== 0;
         }
-        
+
         // 检查测试类型
         const isCyclicTest = data.testType === FrameType.CyclicTest;
-        
-        if (isCyclicTest) {
-          // 周期测试：无论DATA_READY是否为1都广播数据
+
+        if (isCyclicTest && dataReady) {
+          // 周期测试：仅DATA_READY=1时转发电池数据
           io.emit('batteryUpdate', data);
           io.emit('batteryDataUpdate', data);
-          console.log(`周期测试：转发电池数据 (DATA_READY=${dataReady ? 1 : 0})`);
-        } else if (dataReady) {
-          // 快速测试：只有DATA_READY为1时才广播数据
+          console.log('周期测试：转发电池数据 (DATA_READY=1)');
+        } else if (!isCyclicTest) {
+          // 快速测试：不再按DATA_READY过滤
           io.emit('batteryUpdate', data);
           io.emit('batteryDataUpdate', data);
-          console.log('快速测试：转发电池数据 (DATA_READY=1)');
+          console.log(`快速测试：转发电池数据 (DATA_READY=${dataReady ? 1 : 0})`);
         } else {
-          console.log('⚠️ 快速测试模式且DATA_READY位为0，跳过电池数据转发');
+          console.log('周期测试模式且DATA_READY位为0，跳过电池数据转发');
         }
       } else {
         console.log('⚠️ 状态寄存器未定义，跳过电池数据转发');
@@ -830,7 +832,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
       connectedClients.delete(socket.id);
       // 清理该客户端的状态发送缓存
       lastStatusSent.delete(socket.id);
-      
+
       // 如果是最后一个客户端断开，清理所有定时器
       if (connectedClients.size === 0) {
         console.log('所有客户端已断开，清理所有定时器...');
@@ -846,15 +848,15 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
   // TCP事件监听器已移除，仅保留Modbus TCP协议支持
 
   // ===== Modbus 事件监听器 =====
-  
+
   // 监听Modbus客户端连接事件
   modbusEvents.on('clientConnected', (data) => {
     console.log('Modbus客户端连接事件:', data);
-    
+
     // 广播连接状态更新给所有Socket.IO客户端
     const status = getModbusStatus();
     sendStatusUpdate(io, 'modbusStatusUpdate', status);
-    
+
     // 广播连接列表更新
     const modbusConnections = getModbusConnections();
     const connectionList = modbusConnections.map(conn => ({
@@ -867,18 +869,18 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
       lastHeartbeat: conn.lastHeartbeat.toISOString(),
       mac: conn.mac
     }));
-    
+
     sendStatusUpdate(io, 'modbusConnectionsUpdate', connectionList);
   });
 
   // 监听Modbus客户端断开事件
   modbusEvents.on('clientDisconnected', (data) => {
     console.log('Modbus客户端断开事件:', data);
-    
+
     // 广播连接状态更新给所有Socket.IO客户端
     const status = getModbusStatus();
     sendStatusUpdate(io, 'modbusStatusUpdate', status);
-    
+
     // 广播连接列表更新
     const modbusConnections = getModbusConnections();
     const connectionList = modbusConnections.map(conn => ({
@@ -891,14 +893,14 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
       lastHeartbeat: conn.lastHeartbeat.toISOString(),
       mac: conn.mac
     }));
-    
+
     sendStatusUpdate(io, 'modbusConnectionsUpdate', connectionList);
   });
 
   // 监听Modbus连接错误事件
   modbusEvents.on('connectionError', (data) => {
     console.log('Modbus连接错误事件:', data);
-    
+
     // 广播错误信息给所有Socket.IO客户端
     io.emit('modbusConnectionError', {
       connectionId: data.connectionId,
@@ -910,7 +912,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
   // 监听Modbus重连成功事件
   modbusEvents.on('reconnectSuccess', (data) => {
     console.log('Modbus重连成功事件:', data);
-    
+
     // 广播重连成功信息
     io.emit('modbusReconnectSuccess', {
       connectionId: data.connectionId,
@@ -921,7 +923,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
   // 监听Modbus重连失败事件
   modbusEvents.on('reconnectFailed', (data) => {
     console.log('Modbus重连失败事件:', data);
-    
+
     // 广播重连失败信息
     io.emit('modbusReconnectFailed', {
       connectionId: data.connectionId,
@@ -935,110 +937,108 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
   // 监听Modbus电池数据接收事件
   modbusEvents.on('batteryDataReceived', async (data) => {
     console.log('Modbus电池数据接收事件:', data);
-    
+
     try {
       // 获取连接信息
       const connections = getModbusConnections();
       const connection = connections.find(c => c.id === data.connectionId);
-      
+
       if (!connection) {
         console.error('未找到Modbus连接:', data.connectionId);
         return;
       }
-      
+
       // 使用Modbus TCP帧解析工具解析数据
       const { parseRawModbusTCPFrame } = await import('../utils/modbusFrameUtils');
       const parseResult = parseRawModbusTCPFrame(data.data);
-      
+
       if (!parseResult.isValid) {
         console.error('Modbus帧解析失败:', parseResult.error);
         return;
       }
-      
+
       const batteryData = parseResult.batteryData;
       if (!batteryData) {
         console.error('未解析到电池数据');
         return;
       }
-      
+
       // 检查是否为写命令响应（功能码0x06）
       if (batteryData.writeSuccess) {
-        console.log('✅ 收到写寄存器响应: ' + data.data.toString('hex'));
+        console.log('收到写寄存器响应: ' + data.data.toString('hex'));
         // 注意：现在不再等待写命令响应来启动F1轮询，轮询已在写命令发送后立即启动
-        
+
         return;
       }
-      
+
       // 只处理读命令的响应数据（功能码0x03），确保有有效的电池数据
       if (batteryData.status === undefined && batteryData.voltage === undefined) {
         console.log(data.data.toString('hex'));
         return;
       }
-      
+
       // 额外检查：如果没有任何阻抗数据，也跳过
       if (!batteryData.r1 && !batteryData.r2 && !batteryData.r3 && !batteryData.bat3_r1 && !batteryData.bat4_r1) {
-        console.log('⚠️ 跳过无阻抗数据的响应: ' + data.data.toString('hex'));
+        console.log(' 跳过无阻抗数据');
         return;
       }
-      
+
       // 使用IP地址+设备地址的组合作为唯一标识
       const unitId = batteryData.unitId || 1; // 获取Modbus设备地址，默认为1
       const mac = `${connection.host}_${unitId.toString().padStart(2, '0')}`; // 格式：IP_设备地址
-      
-      console.log(`🔍 Modbus电池数据解析完成:`);
-      console.log(`   连接IP: ${connection.host}`);
-      console.log(`   设备地址: 0x${unitId.toString(16).padStart(2, '0')}`);
-      console.log(`   设备标识: ${mac}`);
-      console.log(`   解析结果:`, batteryData);
-      
-      // 自动获取或分配设备编号
-      const { getDeviceNumberByMac } = await import('../services/batteryService');
-      const deviceNumber = await getDeviceNumberByMac(mac);
-      
+      const deviceNumber = unitId;
+
+      // 检查DATA_READY / TEST_DONE 位状态
+      let dataReady = false;
+      let testDone = false;
+      if (batteryData.status !== undefined) {
+        if (typeof batteryData.status === 'object' && batteryData.status) {
+          if ((batteryData.status as any).dataReady !== undefined) {
+            dataReady = !!(batteryData.status as any).dataReady;
+          }
+          if ((batteryData.status as any).testDone !== undefined) {
+            testDone = !!(batteryData.status as any).testDone;
+          }
+        } else if (typeof batteryData.status === 'number') {
+          dataReady = (batteryData.status & STATUS_BITS.DATA_READY) !== 0;
+          testDone = (batteryData.status & STATUS_BITS.TEST_DONE) !== 0;
+        }
+      }
+
+      lastDataReadyByDevice.set(mac, dataReady);
+
       // 根据当前轮询状态判断测试类型
-       const { FrameType } = await import('../models/batteryModel');
-       let testType = FrameType.CyclicTest; // 默认值
-       
-       // 导入pollingService来检查当前轮询状态
-       const { getPollingStatus } = await import('./pollingService');
-       const pollingStatus = getPollingStatus();
-       
-       // 查找当前连接的轮询状态
-       const currentPolling = pollingStatus.find(p => p.connectionId === connection.id);
-       if (currentPolling) {
-         if (currentPolling.type === 'F1') {
-           testType = FrameType.CyclicTest; // F1周期测试
-           console.log(`🔍 基于F1轮询状态判断测试类型: ${testType} (周期测试)`);
-         } else if (currentPolling.type === 'F2') {
-           testType = FrameType.FastTest; // F2快速测试
-           console.log(`🔍 基于F2轮询状态判断测试类型: ${testType} (快速测试)`);
-         }
-       } else {
-         // 如果没有活跃轮询，默认为周期测试
-         testType = FrameType.CyclicTest;
-         console.log(`🔍 无活跃轮询，默认为周期测试: ${testType}`);
-       }
-       
-       // 检查DATA_READY位状态
-       let dataReady = false;
-       if (batteryData.status !== undefined) {
-         if (typeof batteryData.status === 'object' && batteryData.status && (batteryData.status as any).dataReady !== undefined) {
-           dataReady = (batteryData.status as any).dataReady;
-         } else if (typeof batteryData.status === 'number') {
-           // 使用modbusFrameUtils中的STATUS_BITS定义
-           const { STATUS_BITS } = await import('../utils/modbusFrameUtils');
-           dataReady = (batteryData.status & STATUS_BITS.DATA_READY) !== 0;
-         }
-       }
-       
-       // 构建电池数据对象
+      const { FrameType } = await import('../models/batteryModel');
+      let testType = FrameType.CyclicTest; // 默认值
+
+      // 导入pollingService来检查当前轮询状态
+      const { getPollingStatus } = await import('./pollingService');
+      const pollingStatus = getPollingStatus();
+
+      // 查找当前连接的轮询状态
+      const currentPolling = pollingStatus.find(p => p.connectionId === connection.id);
+      if (currentPolling) {
+        if (currentPolling.type === 'F1') {
+          testType = FrameType.CyclicTest; // F1周期测试
+          console.log(`基于F1轮询状态判断测试类型: ${testType} (周期测试)`);
+        } else if (currentPolling.type === 'F2') {
+          testType = FrameType.FastTest; // F2快速测试
+          console.log(`基于F2轮询状态判断测试类型: ${testType} (快速测试)`);
+        }
+      } else {
+        // 如果没有活跃轮询，默认为周期测试
+        testType = FrameType.CyclicTest;
+        console.log(`无活跃轮询，默认为周期测试: ${testType}`);
+      }
+
+      // 构建电池数据对象
       const processedBatteryData = {
         deviceNumber,
         mac,
         status: batteryData.status,
         voltage: batteryData.voltage || 0,
         b2Voltage: batteryData.b2Voltage || 0,
-        
+
         controlRegisterA: batteryData.controlRegisterA,
         controlRegisterB: batteryData.controlRegisterB,
 
@@ -1049,7 +1049,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
         rOhm: batteryData.r1?.actual || 0,
         rSei: batteryData.r2?.actual || 0,
         rCt: batteryData.r3?.actual || 0,
-        
+
         // 新增电池数据
         bat3_r1: batteryData.bat3_r1,
         bat3_r2: batteryData.bat3_r2,
@@ -1057,36 +1057,23 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
         bat4_r1: batteryData.bat4_r1,
         bat4_r2: batteryData.bat4_r2,
         bat4_r3: batteryData.bat4_r3,
-        
+
         testType: testType, // 使用自动判断的测试类型
         timestamp: new Date().toISOString()
       };
-       
-       // 根据测试类型决定是否过滤dataready=0的数据
-       // 周期测试模式：无论dataready是否为1都处理数据
-       // 快速测试模式：只有dataready为1时才处理数据
-       const isCyclicTest = testType === FrameType.CyclicTest;
-       
-       if (!isCyclicTest && !dataReady) {
-         // 仍保存到数据库，但跳过前端数据广播
-         console.log(`⚠️ 快速测试模式且DATA_READY位为0，仍保存数据但跳过广播 设备编号=${deviceNumber}`);
-       }
-      
+
+      // 根据测试类型决定是否处理测量数据：
+      // F1(周期): 仅DATA_READY=1时保存并广播
+      // F2(快速): 由TEST_DONE流程驱动收割，不再按DATA_READY过滤
+      const isCyclicTest = testType === FrameType.CyclicTest;
+      const shouldProcessMeasurement = isCyclicTest ? dataReady : true;
+
+      if (!shouldProcessMeasurement) {
+        console.log(`周期测试模式且DATA_READY位为0，跳过保存与广播 设备编号=${deviceNumber}`);
+      }
+
       console.log(`Modbus电池数据处理完成 - 设备编号: ${deviceNumber}, 主机: ${connection.host}`);
 
-      // 保存数据到数据库，保证IP与设备地址同步写入
-      try {
-        const { saveBatteryData } = await import('../services/batteryService');
-        await saveBatteryData({
-          ...processedBatteryData,
-          ip_prefix: connection.host,
-          device_address: unitId.toString().padStart(2, '0')
-        } as any);
-        console.log(`💾 电池数据已保存到数据库: MAC=${mac}, IP=${connection.host}, Addr=${unitId.toString().padStart(2, '0')}`);
-      } catch (saveErr) {
-        console.error('保存Modbus电池数据到数据库失败:', saveErr);
-      }
-      
       // 始终发送寄存器状态到前端（0x0000状态寄存器、0x0001/0x0002控制寄存器，以及部分数据寄存器）
       if (batteryData.status !== undefined) {
         // 兼容对象或数字两种格式，统一为原始数值
@@ -1108,26 +1095,39 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
         });
         console.log('寄存器状态已发送到前端');
       }
-      
-      // 注意：数据保存已在此处完成，避免在其他路径重复保存
-      
-      // 根据测试类型和DATA_READY位决定是否广播电池数据
-      if (isCyclicTest) {
-        // 周期测试：无论DATA_READY是否为1都广播数据
-        io.emit('batteryUpdate', processedBatteryData);
-        console.log(`周期测试模式：Modbus电池数据已处理并广播 (DATA_READY=${dataReady ? 1 : 0})`);
-      } else if (dataReady) {
-        // 快速测试：只有DATA_READY为1时才广播数据
-        io.emit('batteryUpdate', processedBatteryData);
-        console.log('快速测试模式：Modbus电池数据已处理并广播 (DATA_READY=1)');
-      } else {
-        console.log('快速测试模式：DATA_READY=0，跳过电池数据广播');
+
+      // 保存测量数据到数据库，保证IP与设备地址同步写入
+      if (shouldProcessMeasurement) {
+        try {
+          const { saveBatteryData } = await import('../services/batteryService');
+          await saveBatteryData({
+            ...processedBatteryData,
+            ip_prefix: connection.host,
+            device_address: unitId.toString().padStart(2, '0')
+          } as any);
+          console.log(`电池数据已保存到数据库: MAC=${mac}, IP=${connection.host}, Addr=${unitId.toString().padStart(2, '0')}`);
+        } catch (saveErr) {
+          console.error('保存Modbus电池数据到数据库失败:', saveErr);
+        }
       }
-      
+
+      // 根据测试类型和门控策略决定是否广播电池数据
+      if (isCyclicTest && shouldProcessMeasurement) {
+        // 周期测试：仅DATA_READY=1时广播
+        io.emit('batteryUpdate', processedBatteryData);
+        console.log('周期测试模式：Modbus电池数据已处理并广播 (DATA_READY=1)');
+      } else if (!isCyclicTest && shouldProcessMeasurement) {
+        // 快速测试：由TEST_DONE流程触发收割，不按DATA_READY过滤
+        io.emit('batteryUpdate', processedBatteryData);
+        console.log(`快速测试模式：Modbus电池数据已处理并广播 (TEST_DONE=${testDone ? 1 : 0}, DATA_READY=${dataReady ? 1 : 0})`);
+      } else {
+        console.log('周期测试模式：DATA_READY=0，跳过电池数据广播');
+      }
+
     } catch (error) {
       console.error('处理Modbus电池数据时出错:', error);
     }
-    
+
     // 同时保留原始的数据事件广播（用于调试）
     io.emit('modbusDataReceived', {
       connectionId: data.connectionId,
@@ -1139,7 +1139,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
   // 监听Modbus命令发送事件
   modbusEvents.on('commandSent', (data) => {
     console.log('Modbus命令发送事件:', data);
-    
+
     // 广播命令发送事件
     io.emit('modbusCommandSent', {
       connectionId: data.connectionId,
@@ -1152,7 +1152,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
   // 监听Modbus广播命令完成事件
   modbusEvents.on('broadcastCommandComplete', (data) => {
     console.log('Modbus广播命令完成事件:', data);
-    
+
     // 广播命令完成事件
     io.emit('modbusBroadcastComplete', {
       command: data.command,
@@ -1166,6 +1166,6 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
   // 数据采样服务事件监听器已移除，改为按需获取数据
 
   console.log('Socket.IO服务器初始化完成（仅支持Modbus TCP协议）');
-  console.log('🚀 网络扫描功能：输入指定IP扫描局域网段');
-  console.log('🔌 默认端口: 502 (Modbus TCP)')
+  console.log('网络扫描功能：输入指定IP扫描局域网段');
+  console.log('默认端口: 502 (Modbus TCP)')
 };

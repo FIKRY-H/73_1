@@ -52,3 +52,10 @@ ehthumbs.db
 # Temporary files
 tmp/
 temp/
+
+# Local agent/runtime workspace
+.agent/
+.venv/
+
+# Packaged
+packages/

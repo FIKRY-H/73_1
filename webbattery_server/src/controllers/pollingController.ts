@@ -120,15 +120,15 @@ export const startF1CyclicTestController = async (req: Request, res: Response) =
       });
     }
 
-    // 检测设备接收到小于1秒检测频率，统一按1秒周期测试
-    if (periodSeconds && periodSeconds < 1) {
-      periodSeconds = 1;
+    // 检测设备接收到小于3秒检测频率，统一按3秒周期测试
+    if (periodSeconds && periodSeconds < 3) {
+      periodSeconds = 3;
     }
     
     if (!periodSeconds || periodSeconds > 60) {
       return res.status(400).json({
         success: false,
-        message: '周期时间必须在1-60秒之间'
+        message: '周期时间必须在3-60秒之间'
       });
     }
     

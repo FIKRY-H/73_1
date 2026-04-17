@@ -186,9 +186,8 @@ export const BatteryDataProvider: React.FC<{ children: React.ReactNode }> = ({ c
           return;
         }
         
-        // 根据测试类型决定是否过滤数据就绪状态为0的数据
-        // 周期测试：不过滤数据就绪状态为0的数据，全部显示
-        // 快速测试：跳过数据就绪状态为0的数据
+        // 根据测试类型记录状态信息，但不在前端按DATA_READY过滤
+        // F1(周期)与F2(快速)的有效性由后端统一门控
         const isCyclicTest = actualData.testType === 'CyclicTest' || actualData.testType === '周期测试' || actualData.testType === 170 || actualData.testType === 0xAA;
         const isFastTest = actualData.testType === 'FastTest' || actualData.testType === '快速测试' || actualData.testType === 250 || actualData.testType === 0xFA;
         
@@ -197,21 +196,20 @@ export const BatteryDataProvider: React.FC<{ children: React.ReactNode }> = ({ c
         if (actualData.status && typeof actualData.status === 'object' && 'dataReady' in actualData.status) {
           dataReadyValue = actualData.status.dataReady ? 1 : 0;
         } else if (typeof actualData.status === 'number') {
-          // 按RS485文档：DATA_READY位位于bit8
-          dataReadyValue = (actualData.status & 0x0100) !== 0 ? 1 : 0;
+          // GET3017_v4_20260416: DATA_READY 位于 bit7
+          dataReadyValue = (actualData.status & 0x0080) !== 0 ? 1 : 0;
         } else if (actualData.dataReady !== undefined) {
           dataReadyValue = actualData.dataReady ? 1 : 0;
         } else if (actualData.dataready !== undefined) {
           dataReadyValue = actualData.dataready ? 1 : 0;
         }
         
-        if (isFastTest && dataReadyValue === 0) {
-          console.log('BatteryDataContext: 快速测试：跳过数据就绪状态为0的数据，不添加到状态中:', actualData);
-          return;
-        }
-        
         if (isCyclicTest && dataReadyValue === 0) {
-          console.log('BatteryDataContext: 周期测试：保留数据就绪状态为0的数据，添加到状态中:', actualData);
+          console.log('BatteryDataContext: 周期测试数据到达，DATA_READY=0（后端应已完成筛选）:', actualData);
+        }
+
+        if (isFastTest) {
+          console.log('BatteryDataContext: 快速测试数据到达（由TEST_DONE流程驱动）:', actualData);
         }
         
         console.log('BatteryDataContext: 接收到电池数据，测试类型:', actualData.testType, '数据就绪状态值:', dataReadyValue);

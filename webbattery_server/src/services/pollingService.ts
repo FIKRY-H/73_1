@@ -8,36 +8,41 @@ const shouldEnablePolling = (): boolean => {
   const connections = getClientConnections();
   const activeConnections = connections.filter(conn => conn.isConnected);
   const deviceCount = activeConnections.length;
-  
-  console.log(`🔍 设备数量检查: 当前连接${deviceCount}台设备`);
-  
+
+  console.log(` 设备数量检查: 当前连接${deviceCount}台设备`);
+
   if (deviceCount === 0) {
-    console.log(`⚠️ 轮询被禁用: 没有连接的设备`);
+    console.log(` 轮询被禁用: 没有连接的设备`);
     return false;
   }
-  
-  console.log(`✅ 轮询已启用: 连接设备数量(${deviceCount})台`);
+
+  console.log(` 轮询已启用: 连接设备数量(${deviceCount})台`);
   return true;
 };
 
 // 数据采样服务事件发射器
 export const pollingEvents = new EventEmitter();
 
-// 设备数据接口（按照新协议规范 2026-01-15）
+// 设备数据接口（按照新协议规范 2026-04-14）
 interface DeviceData {
   connectionId: string;
   host: string;
   mac: string;
   deviceId: number;
-  statusRegister: number; // 0x0005: 状态寄存器
-  offlineCounter: number; // 0x0004: 离线测试计数器
-  voltage: number;        // 0x0000: 电压（mV）
-  r1: number;             // 0x0001: 电池1阻抗 R1
-  r2: number;             // 0x0002: 电池1阻抗 R2
-  r3: number;             // 0x0003: 电池1阻抗 R3
-  
-  controlA: number;       // 0x0006: 控制寄存器A
-  controlB: number;       // 0x0007: 控制寄存器B
+  statusRegister: number; // 0x0000: 状态寄存器
+  voltage: number;        // 0x0003: 电压（mV）
+  r1: number;             // 0x0004: 电池1阻抗 R1
+  r2: number;             // 0x0005: 电池1阻抗 R2
+  r3: number;             // 0x0006: 电池1阻抗 R3
+  bat3_r1?: number;       // 0x0007: 电池3阻抗 R1
+  bat3_r2?: number;       // 0x0008: 电池3阻抗 R2
+  bat3_r3?: number;       // 0x0009: 电池3阻抗 R3
+  bat4_r1?: number;       // 0x000A: 电池4阻抗 R1
+  bat4_r2?: number;       // 0x000B: 电池4阻抗 R2
+  bat4_r3?: number;       // 0x000C: 电池4阻抗 R3
+
+  controlA: number;       // 0x0001: 控制寄存器A
+  controlB: number;       // 0x0002: 控制寄存器B
 
   r1Actual: number;       // 计算后的R1实际值
   r2Actual: number;       // 计算后的R2实际值
@@ -46,25 +51,26 @@ interface DeviceData {
   errorCount: number;
 }
 
-// 寄存器地址定义 (按照用户2026-01-16协议)
+// 寄存器地址定义 (按照GET3017协议)
 // 写入命令(广播): UnitID = 0xFF
-// 读数据命令(单播): UnitID = 1~12
+// 读数据命令(单播): UnitID = 1~24
 const REGISTERS = {
   DATA_START: 0x0000,        // 数据起始地址
-  DATA_COUNT: 8,             // 数据读取长度 (0x0000 ~ 0x0007)
-  STATUS: 0x0005,            // 状态寄存器 (在读数据块中也会读到)
-  CONTROL_CYCLE: 0x0007,     // 启动(写周期)/停止(写0)地址
+  DATA_COUNT: 13,            // 数据读取长度 (0x0000 ~ 0x000C)
+  STATUS: 0x0000,            // 状态寄存器
+  CONTROL_CYCLE: 0x0002,     // 启动(写周期)/停止(写0)地址
   BROADCAST_UNIT_ID: 0xFF,   // 广播/控制 Unit ID
-  CONTROL_A: 0x0006,
-  CONTROL_B: 0x0007
+  CONTROL_A: 0x0001,
+  CONTROL_B: 0x0002
 };
 
 // 状态位掩码
 const STATUS_MASK = {
-  MEAS_ENABLE:  0x0001, // Bit 0
-  COMM_TIMEOUT: 0x0020, // Bit 5
-  DATA_READY:   0x0080, // Bit 7
-  COMM_ERROR:   0x0100  // Bit 8
+  MEAS_ENABLE: 0x0001, // Bit 0
+  COMM_TIMEOUT: 0x0010, // Bit 4
+  TEST_DONE: 0x0020, // Bit 5
+  DATA_READY: 0x0080, // Bit 7
+  COMM_ERROR: 0x0100  // Bit 8
 };
 
 // 设备状态映射
@@ -82,7 +88,7 @@ function getNextTransactionId(): number {
 export const readDeviceStatus = async (connectionId: string, unitId: number): Promise<number | null> => {
   try {
     const txId = getNextTransactionId();
-    // 读取1个寄存器 0x0005
+    // 读取1个寄存器 0x0000
     const buffer = await readHoldingRegistersWithFixedTxId(connectionId, txId, REGISTERS.STATUS, 1, unitId);
     if (buffer && buffer.length >= 2) {
       return buffer.readUInt16BE(0);
@@ -94,37 +100,62 @@ export const readDeviceStatus = async (connectionId: string, unitId: number): Pr
 };
 
 // 读取完整设备数据 (0x0000-0x0007)
-export const readDeviceData = async (connectionId: string, targetUnitId: number = 1): Promise<DeviceData | null> => {
+export const readDeviceData = async (
+  connectionId: string,
+  targetUnitId: number = 1,
+  logContext?: 'F1_POLLING'
+): Promise<DeviceData | null> => {
   try {
     const txId = getNextTransactionId();
-    // 读取8个寄存器
+
+    // 仅在F1主轮询路径输出完整帧日志，便于排查上位机下发内容
+    if (logContext === 'F1_POLLING') {
+      const txHex = txId.toString(16).toUpperCase().padStart(4, '0');
+      const unitHex = targetUnitId.toString(16).toUpperCase().padStart(2, '0');
+      console.log(`F1轮询读取帧 ${connectionId}: ${txHex.slice(0, 2)} ${txHex.slice(2)} 00 00 00 06 ${unitHex} 03 00 00 00 0D`);
+    }
+
+    // 读取13个寄存器
     const dataBuffer = await readHoldingRegistersWithFixedTxId(connectionId, txId, REGISTERS.DATA_START, REGISTERS.DATA_COUNT, targetUnitId);
-    
+
     const { getClientConnections } = await import('./modbusService');
     const connections = getClientConnections();
     const connection = connections.find(conn => conn.id === connectionId);
     const host = connection?.host || '';
     const uniqueMac = `${host}_${targetUnitId.toString().padStart(2, '0')}`;
-    
+
     // 解析数据
     let voltage = 0;
     let r1 = 0; let r2 = 0; let r3 = 0;
-    let offlineCounter = 0;
+    let bat3_r1 = 0; let bat3_r2 = 0; let bat3_r3 = 0;
+    let bat4_r1 = 0; let bat4_r2 = 0; let bat4_r3 = 0;
     let statusRegister = 0;
     let controlA = 0; let controlB = 0;
-    
-    if (dataBuffer && dataBuffer.length >= 16) { 
-        voltage = dataBuffer.readUInt16BE(0);        // 0x0000
-        r1 = dataBuffer.readUInt16BE(2);             // 0x0001
-        r2 = dataBuffer.readUInt16BE(4);             // 0x0002
-        r3 = dataBuffer.readUInt16BE(6);             // 0x0003
-        offlineCounter = dataBuffer.readUInt16BE(8); // 0x0004
-        statusRegister = dataBuffer.readUInt16BE(10);// 0x0005
-        controlA = dataBuffer.readUInt16BE(12);      // 0x0006
-        controlB = dataBuffer.readUInt16BE(14);      // 0x0007
+
+    if (dataBuffer && dataBuffer.length >= 26) {
+      statusRegister = dataBuffer.readUInt16BE(0); // 0x0000
+      controlA = dataBuffer.readUInt16BE(2);       // 0x0001
+      controlB = dataBuffer.readUInt16BE(4);       // 0x0002
+      let rawV = dataBuffer.readUInt16BE(6);       // 0x0003
+      voltage = rawV & 0x1FFF;
+      const multiplierIndex = (rawV >> 13) & 0x07;
+      const multipliers = [1, 4, 8, 12, 16, 20, 24, 28];
+      const m = multipliers[multiplierIndex] || 1;
+
+      r1 = dataBuffer.readUInt16BE(8) * m;
+      r2 = dataBuffer.readUInt16BE(10) * m;
+      r3 = dataBuffer.readUInt16BE(12) * m;
+
+      bat3_r1 = dataBuffer.readUInt16BE(14) * m;
+      bat3_r2 = dataBuffer.readUInt16BE(16) * m;
+      bat3_r3 = dataBuffer.readUInt16BE(18) * m;
+
+      bat4_r1 = dataBuffer.readUInt16BE(20) * m;
+      bat4_r2 = dataBuffer.readUInt16BE(22) * m;
+      bat4_r3 = dataBuffer.readUInt16BE(24) * m;
     } else {
-       // 读取失败或数据不完整
-       return null;
+      // 读取失败或数据不完整
+      return null;
     }
 
     const deviceData: DeviceData = {
@@ -133,23 +164,24 @@ export const readDeviceData = async (connectionId: string, targetUnitId: number 
       mac: uniqueMac,
       deviceId: targetUnitId,
       statusRegister,
-      offlineCounter,
       voltage,
       r1, r2, r3,
+      bat3_r1, bat3_r2, bat3_r3,
+      bat4_r1, bat4_r2, bat4_r3,
       controlA, controlB,
       r1Actual: r1, r2Actual: r2, r3Actual: r3,
       timestamp: new Date(),
       errorCount: 0
     };
 
-    console.log(`✅ [Unit ${targetUnitId}] Data: V=${voltage}, Status=0x${statusRegister.toString(16)}, Cnt=${offlineCounter}`);
-    
+    console.log(` [Unit ${targetUnitId}] Data: V=${voltage}, Status=0x${statusRegister.toString(16)}`);
+
     // 更新缓存并发送前端
-    deviceStates.set(connectionId, deviceData); 
+    deviceStates.set(connectionId, deviceData);
     await sendDataToFrontend(deviceData);
 
     return deviceData;
-    
+
   } catch (error) {
     console.error(`Read error ${connectionId} Unit:${targetUnitId}`, error);
     return null;
@@ -158,17 +190,17 @@ export const readDeviceData = async (connectionId: string, targetUnitId: number 
 
 // 静默读取设备数据 (0x0000-0x0007) — 仅用于扫描
 // 与 readDeviceData 的区别：不调用 sendDataToFrontend()，不写 deviceStates 缓存
-// 这样扫描 128 个 UID 时不会向前端发送 batteryUpdate 事件，也不会污染数据表格
+// 这样扫描24个 UID 时不会向前端发送 batteryUpdate 事件，也不会污染数据表格
 const readDeviceDataSilently = async (connectionId: string, targetUnitId: number): Promise<boolean> => {
   try {
     const txId = getNextTransactionId();
     const dataBuffer = await readHoldingRegistersWithFixedTxId(connectionId, txId, REGISTERS.DATA_START, REGISTERS.DATA_COUNT, targetUnitId);
-    
-    // 只要收到 16 字节（8 个寄存器 × 2 字节）就认为在线
-    if (dataBuffer && dataBuffer.length >= 16) {
-      const voltage = dataBuffer.readUInt16BE(0);
-      const statusRegister = dataBuffer.readUInt16BE(10);
-      console.log(`🔍 [Scan] Unit ${targetUnitId}: 在线 (V=${voltage}, Status=0x${statusRegister.toString(16)})`);
+
+    // 只要收到 26 字节（13 个寄存器 × 2 字节）就认为在线
+    if (dataBuffer && dataBuffer.length >= 26) {
+      const statusRegister = dataBuffer.readUInt16BE(0);
+      const voltage = dataBuffer.readUInt16BE(6) & 0x1FFF;
+      console.log(`[Scan] Unit ${targetUnitId}: 在线 (V=${voltage}, Status=0x${statusRegister.toString(16)})`);
       return true;
     }
     return false;
@@ -181,9 +213,9 @@ const readDeviceDataSilently = async (connectionId: string, targetUnitId: number
 export const getAllDevicesData = async (): Promise<DeviceData[]> => {
   const connections = getClientConnections();
   const activeConnections = connections.filter(conn => conn.isConnected);
-  
+
   const results: DeviceData[] = [];
-  
+
   for (const connection of activeConnections) {
     try {
       const data = await readDeviceData(connection.connectionId);
@@ -199,7 +231,7 @@ export const getAllDevicesData = async (): Promise<DeviceData[]> => {
       console.error(`读取设备数据失败 ${connection.connectionId}:`, error);
     }
   }
-  
+
   return results;
 };
 
@@ -210,12 +242,12 @@ export const scanOnlineDevices = async (connectionId: string): Promise<{
 }> => {
   const onlineDevices: number[] = [];
   const io = getSocketIOInstance();
-  
-  console.log(`🔍 [Scan] 开始扫描连接 ${connectionId} 的所有设备 (1-24)`);
-  
+
+  console.log(`[Scan] 开始扫描连接 ${connectionId} 的所有设备 (1-24)`);
+
   // 发送开始事件
   io.emit('deviceScanStarted', { connectionId, total: 24 });
-  
+
   for (let unitId = 1; unitId <= 24; unitId++) {
     try {
       // 通过静默读取判断是否在线（不触发 batteryUpdate 事件）
@@ -223,38 +255,38 @@ export const scanOnlineDevices = async (connectionId: string): Promise<{
       if (isOnline) {
         onlineDevices.push(unitId);
       }
-      
+
       // 实时发送进度
-      io.emit('deviceScanProgress', { 
+      io.emit('deviceScanProgress', {
         connectionId,
-        unitId, 
-        online: isOnline, 
-        progress: unitId, 
-        total: 24 
+        unitId,
+        online: isOnline,
+        progress: unitId,
+        total: 24
       });
-      
+
     } catch (error) {
-      io.emit('deviceScanProgress', { 
+      io.emit('deviceScanProgress', {
         connectionId,
-        unitId, 
-        online: false, 
-        progress: unitId, 
-        total: 24 
+        unitId,
+        online: false,
+        progress: unitId,
+        total: 24
       });
     }
-    
+
     // 短暂延时，避免瞬间发包过多导致拥塞
     await new Promise(r => setTimeout(r, 10));
   }
-  
-  console.log(`✅ [Scan] 扫描完成。发现 ${onlineDevices.length} 个在线设备`);
-  
-  io.emit('deviceScanComplete', { 
+
+  console.log(`[Scan] 扫描完成。发现 ${onlineDevices.length} 个在线设备`);
+
+  io.emit('deviceScanComplete', {
     connectionId,
-    onlineDevices, 
-    totalScanned: 24 
+    onlineDevices,
+    totalScanned: 24
   });
-  
+
   return { onlineDevices, totalScanned: 24 };
 };
 
@@ -262,14 +294,14 @@ export const scanOnlineDevices = async (connectionId: string): Promise<{
 // 获取单个设备数据
 export const getDeviceData = async (connectionId: string): Promise<DeviceData | null> => {
   const connections = getClientConnections();
-  const connection = connections.find(conn => 
+  const connection = connections.find(conn =>
     conn.connectionId === connectionId && conn.isConnected
   );
-  
+
   if (!connection) {
     throw new Error(`设备连接不存在或未连接: ${connectionId}`);
   }
-  
+
   const data = await readDeviceData(connectionId);
   if (data) {
     // 补充连接信息
@@ -278,7 +310,7 @@ export const getDeviceData = async (connectionId: string): Promise<DeviceData | 
     data.mac = `${connection.host}_${connection.deviceId.toString().padStart(2, '0')}`;
     data.deviceId = connection.deviceId;
   }
-  
+
   return data;
 };
 
@@ -286,37 +318,37 @@ export const getDeviceData = async (connectionId: string): Promise<DeviceData | 
 
 // 发送电池数据到前端（简化版本，不再处理状态寄存器）
 export const sendDataToFrontend = async (deviceData: DeviceData) => {
-  
+
   // 根据当前轮询状态判断测试类型
   const { FrameType } = await import('../models/batteryModel');
   let testType = FrameType.CyclicTest; // 默认值
-  
+
   // 首先检查当前是否有活跃的轮询
   const currentPolling = pollingTimers.get(deviceData.connectionId);
   if (currentPolling) {
     if (currentPolling.type === 'F1') {
       testType = FrameType.CyclicTest; // F1周期测试
-      console.log(`🔍 基于F1轮询状态判断测试类型: ${testType} (周期测试)`);
+      console.log(` 基于F1轮询状态判断测试类型: ${testType} (周期测试)`);
     } else if (currentPolling.type === 'F2') {
       testType = FrameType.FastTest; // F2快速测试
-      console.log(`🔍 基于F2轮询状态判断测试类型: ${testType} (快速测试)`);
+      console.log(` 基于F2轮询状态判断测试类型: ${testType} (快速测试)`);
     }
   } else {
     // 如果没有活跃轮询，检查全局F1轮询定时器（兼容旧的轮询机制）
     if (global.f1PollingTimers && global.f1PollingTimers.has(deviceData.connectionId)) {
       testType = FrameType.CyclicTest; // F1周期测试
-      console.log(`🔍 基于全局F1轮询状态判断测试类型: ${testType} (周期测试)`);
+      console.log(` 基于全局F1轮询状态判断测试类型: ${testType} (周期测试)`);
     } else {
       // 默认为周期测试（因为两种测试类型数据格式相同，无法通过数据内容区分）
       testType = FrameType.CyclicTest;
-      console.log(`🔍 无法确定测试类型，默认为周期测试: ${testType}`);
+      console.log(` 无法确定测试类型，默认为周期测试: ${testType}`);
     }
   }
-  
+
   // 由于移除了状态寄存器，所有数据都会被发送
-  console.log(`ℹ️ 发送电池数据到前端 ${deviceData.connectionId}: 电压=${deviceData.voltage}mV`);
-  console.log(`🔖 前端使用设备标识: ${deviceData.mac}`);
-  
+  console.log(` 发送电池数据到前端 ${deviceData.connectionId}: 电压=${deviceData.voltage}mV`);
+  console.log(` 前端使用设备标识: ${deviceData.mac}`);
+
   const batteryData = {
     deviceNumber: deviceData.deviceId,
     mac: deviceData.mac,
@@ -330,7 +362,7 @@ export const sendDataToFrontend = async (deviceData: DeviceData) => {
     r2_actual: deviceData.r2Actual,
     r3_low: deviceData.r3,
     r3_actual: deviceData.r3Actual,
-    
+
     connectionId: deviceData.connectionId,
     host: deviceData.host,
     errorCount: deviceData.errorCount,
@@ -338,32 +370,32 @@ export const sendDataToFrontend = async (deviceData: DeviceData) => {
     testType: testType,
     // 状态位由socketService的解析结果决定，这里不设置
   };
-  
+
   // 检查发送到前端的阻抗数据
   if (deviceData.r1Actual === 0 || deviceData.r2Actual === 0 || deviceData.r3Actual === 0) {
-    console.warn(`⚠️ 发送到前端的数据中检测到阻抗值为0: R1=${deviceData.r1Actual}, R2=${deviceData.r2Actual}, R3=${deviceData.r3Actual}`);
-    console.warn(`⚠️ 设备: ${deviceData.connectionId}, MAC: ${deviceData.mac}, 测试类型: ${testType}`);
+    console.warn(` 发送到前端的数据中检测到阻抗值为0: R1=${deviceData.r1Actual}, R2=${deviceData.r2Actual}, R3=${deviceData.r3Actual}`);
+    console.warn(` 设备: ${deviceData.connectionId}, MAC: ${deviceData.mac}, 测试类型: ${testType}`);
   }
-  
+
   // 数据保存改由socketService的Modbus接收路径统一处理，避免重复保存与零值写入
 
   // 注意：不在这里发送batteryDataUpdate事件，避免与socketService中的batteryUpdate重复发送
   // socketService中的modbusDataReceived事件处理器会发送batteryUpdate事件
   // 这里只负责日志与流程控制，前端数据更新与数据保存由socketService统一处理
-  
-  console.log(`✅ 电池数据已保存 ${deviceData.connectionId}: 电压=${deviceData.voltage}mV, R1=${deviceData.r1Actual}μΩ, R2=${deviceData.r2Actual}μΩ, R3=${deviceData.r3Actual}μΩ, 测试类型=${testType}`);
+
+  console.log(` 电池数据已保存 ${deviceData.connectionId}: 电压=${deviceData.voltage}mV, R1=${deviceData.r1Actual}μΩ, R2=${deviceData.r2Actual}μΩ, R3=${deviceData.r3Actual}μΩ, 测试类型=${testType}`);
 };
 
 // 启动F2快速测试模式
 export const startF2FastTest = async (connectionId: string, targetUnitId: number = 1): Promise<boolean> => {
   try {
     const txId = getNextTransactionId();
-    console.log(`📝 F2快速测试模式启动 ${connectionId}: 写0x0001=0x0001, UnitID=${targetUnitId}`);
+    console.log(` F2快速测试模式启动 ${connectionId}: 写0x0001=0x0001, UnitID=${targetUnitId}`);
     await writeSingleRegisterWithFixedTxId(connectionId, txId, REGISTERS.CONTROL_A, 0x0001, targetUnitId);
-    console.log(`✅ F2快速测试启动成功 ${connectionId}`);
+    console.log(` F2快速测试启动成功 ${connectionId}`);
     return true;
   } catch (error) {
-    console.error(`❌ F2快速测试启动失败 ${connectionId}:`, error);
+    console.error(` F2快速测试启动失败 ${connectionId}:`, error);
     return false;
   }
 };
@@ -372,12 +404,12 @@ export const startF2FastTest = async (connectionId: string, targetUnitId: number
 export const initializeDevice = async (connectionId: string): Promise<boolean> => {
   try {
     const txId = getNextTransactionId();
-    console.log(`📝 初始化设备 ${connectionId}: 写0x0001=0x0002`);
+    console.log(` 初始化设备 ${connectionId}: 写0x0001=0x0002`);
     await writeSingleRegisterWithFixedTxId(connectionId, txId, REGISTERS.CONTROL_A, 0x0002);
-    console.log(`✅ 初始化指令已下发 ${connectionId}`);
+    console.log(` 初始化指令已下发 ${connectionId}`);
     return true;
   } catch (error) {
-    console.error(`❌ 初始化设备失败 ${connectionId}:`, error);
+    console.error(` 初始化设备失败 ${connectionId}:`, error);
     return false;
   }
 };
@@ -388,15 +420,15 @@ export const startF1CyclicTest = async (connectionId: string, periodSeconds: num
     if (periodSeconds < 1 || periodSeconds > 60) {
       throw new Error('周期时间必须在1-60秒之间');
     }
-    
+
     const txId = getNextTransactionId();
-    console.log(`📝 F1周期测试模式启动 ${connectionId}: 写0x0007=${periodSeconds}`);
+    console.log(` F1周期测试模式启动 ${connectionId}: 写0x0002=${periodSeconds}`);
     await writeSingleRegisterWithFixedTxId(connectionId, txId, REGISTERS.CONTROL_CYCLE, periodSeconds);
-    
-    console.log(`✅ F1周期测试启动成功 ${connectionId}`);
+
+    console.log(` F1周期测试启动成功 ${connectionId}`);
     return true;
   } catch (error) {
-    console.error(`❌ F1周期测试启动失败 ${connectionId}:`, error);
+    console.error(` F1周期测试启动失败 ${connectionId}:`, error);
     return false;
   }
 };
@@ -407,11 +439,11 @@ export const startF1CyclicTest = async (connectionId: string, periodSeconds: num
 // 停止测试（F1/F2）- 强制中止模式
 export const stopTest = async (connectionId: string): Promise<boolean> => {
   try {
-    console.log(`🛑 停止测试 ${connectionId} (无需写入控制寄存器)`);
-    console.log(`✅ 测试停止成功 ${connectionId}`);
+    console.log(` 停止测试 ${connectionId} (无需写入控制寄存器)`);
+    console.log(` 测试停止成功 ${connectionId}`);
     return true;
   } catch (error) {
-    console.error(`❌ 测试停止失败 ${connectionId}:`, error);
+    console.error(` 测试停止失败 ${connectionId}:`, error);
     return false;
   }
 };
@@ -419,7 +451,7 @@ export const stopTest = async (connectionId: string): Promise<boolean> => {
 // 停止周期检测（仅停止周期测试，不强制终止）
 export const stopCyclicTest = async (connectionId: string): Promise<boolean> => {
   try {
-    console.log(`⏹️ 停止周期检测 ${connectionId} (写0x0007=0停止F1周期测试)`);
+    console.log(` 停止周期检测 ${connectionId} (写0x0007=0停止F1周期测试)`);
 
     // 停止轮询（若存在，会同时触发写0x0007=0）
     stopPolling(connectionId);
@@ -428,20 +460,20 @@ export const stopCyclicTest = async (connectionId: string): Promise<boolean> => 
     const connections = getClientConnections();
     const activeConnections = connections.filter(conn => conn.isConnected);
     for (const conn of activeConnections) {
-      if(conn.id === connectionId || conn.connectionId === connectionId) {
+      if (conn.id === connectionId || conn.connectionId === connectionId) {
         try {
           const txId = getNextTransactionId();
           await writeSingleRegisterWithFixedTxId(conn.id, txId, REGISTERS.CONTROL_CYCLE, 0x0000);
         } catch (error) {
-          console.error(`❌ F1停止命令发送失败 ${conn.id}:`, error);
+          console.error(` F1停止命令发送失败 ${conn.id}:`, error);
         }
       }
     }
 
-    console.log(`✅ 周期检测停止成功 ${connectionId}`);
+    console.log(` 周期检测停止成功 ${connectionId}`);
     return true;
   } catch (error) {
-    console.error(`❌ 周期检测停止失败 ${connectionId}:`, error);
+    console.error(` 周期检测停止失败 ${connectionId}:`, error);
     return false;
   }
 };
@@ -486,78 +518,80 @@ const cooldowns = new Map<string, number>(); // connectionId -> cooldownEndTime 
 
 // 恢复错误状态：停止 -> 快速读取直到 clean -> 返回
 const recoverConnectionState = async (connectionId: string, targetUnitIds: number[]): Promise<boolean> => {
-    console.log(`🛡️ 进入恢复模式 ${connectionId} ...`);
-    
-    // 1. 发送停止命令 (UnitFF)
-    try {
-        const txId = getNextTransactionId();
-        await writeSingleRegisterWithFixedTxId(connectionId, txId, REGISTERS.CONTROL_CYCLE, 0x0000, REGISTERS.BROADCAST_UNIT_ID);
-        console.log(`⏹️ [恢复] 停止命令已发送 (Unit FF)`);
-    } catch (e) {
-        console.error(`❌ [恢复] 停止命令失败`, e);
+  console.log(` 进入恢复模式 ${connectionId} ...`);
+
+  // 1. 发送停止命令 (UnitFF)
+  try {
+    const txId = getNextTransactionId();
+    await writeSingleRegisterWithFixedTxId(connectionId, txId, REGISTERS.CONTROL_CYCLE, 0x0000, REGISTERS.BROADCAST_UNIT_ID);
+    console.log(` [恢复] 停止命令已发送 (Unit FF)`);
+  } catch (e) {
+    console.error(` [恢复] 停止命令失败`, e);
+  }
+
+  // 2. 快速读取循环 (10ms)
+  // 策略优化:
+  // 1. 维护pending列表，只检查尚未就绪的设备
+  // 2. 只有所有在线设备都就绪(Cnt=0)才退出，保证同步
+  // 3. 读取失败(离线)的设备直接移除，防止拖慢整体进度(解决卡顿问题)
+  const maxWrapperTime = 10000; // 最多尝试10秒
+  const startTime = Date.now();
+
+  // 初始包含所有目标设备
+  let pendingUnitIds = [...targetUnitIds];
+
+  while (Date.now() - startTime < maxWrapperTime) {
+    if (pendingUnitIds.length === 0) {
+      console.log(`[恢复] 所有设备已恢复正常 (Cnt=0)`);
+      return true;
     }
-    
-    // 2. 快速读取循环 (10ms)
-    // 策略优化:
-    // 1. 维护pending列表，只检查尚未就绪的设备
-    // 2. 只有所有在线设备都就绪(Cnt=0)才退出，保证同步
-    // 3. 读取失败(离线)的设备直接移除，防止拖慢整体进度(解决卡顿问题)
-    const maxWrapperTime = 10000; // 最多尝试10秒
-    const startTime = Date.now();
-    
-    // 初始包含所有目标设备
-    let pendingUnitIds = [...targetUnitIds];
 
-    while (Date.now() - startTime < maxWrapperTime) {
-        if (pendingUnitIds.length === 0) {
-            console.log(`✅ [恢复] 所有设备已恢复正常 (Cnt=0)`);
-            return true;
+    // 记录本轮是否发生过耗时操作(如读取)，用于控制循环速率
+    let didWork = false;
+
+    // 倒序遍历以便安全删除
+    for (let i = pendingUnitIds.length - 1; i >= 0; i--) {
+      const unitId = pendingUnitIds[i];
+      const data = await readDeviceData(connectionId, unitId);
+      didWork = true;
+
+      if (data) {
+        // 利用 COMM_TIMEOUT 位来判断设备是否从掉线状态完全恢复通讯。
+        // COMM_TIMEOUT == 0 说明设备底层的通讯超时报警已经被清除（收到上位机的帧了）
+        if ((data.statusRegister & STATUS_MASK.COMM_TIMEOUT) === 0) {
+          // 设备就绪，从等待列表移除
+          // console.log(`Unit ${unitId} 就绪 (COMM_TIMEOUT === 0)`);
+          pendingUnitIds.splice(i, 1);
+        } else {
+          // 设备忙(COMM_TIMEOUT != 0)，保留在列表，下一轮继续检查
+          // console.log(` Unit ${unitId} 忙 (COMM_TIMEOUT 尚未清零)`);
         }
-
-        // 记录本轮是否发生过耗时操作(如读取)，用于控制循环速率
-        let didWork = false;
-
-        // 倒序遍历以便安全删除
-        for (let i = pendingUnitIds.length - 1; i >= 0; i--) {
-             const unitId = pendingUnitIds[i];
-             const data = await readDeviceData(connectionId, unitId);
-             didWork = true;
-
-             if (data) {
-                 if (data.offlineCounter === 0) {
-                     // 设备就绪，从等待列表移除
-                     // console.log(`✅ Unit ${unitId} 就绪`);
-                     pendingUnitIds.splice(i, 1);
-                 } else {
-                     // 设备忙(Cnt!=0)，保留在列表，下一轮继续检查
-                     // console.log(`⏳ Unit ${unitId} 忙 (Cnt=${data.offlineCounter})`);
-                 }
-             } else {
-                 // 读取失败(超时/离线)，视为"无法恢复"或"无需等待"
-                 // 直接移除，避免因等待离线设备导致界面卡顿10秒
-                 console.warn(`⚠️ [恢复] Unit ${unitId} 读取失败，跳过等待`);
-                 pendingUnitIds.splice(i, 1);
-             }
-        }
-        
-        // 如果列表被清空，立即成功
-        if (pendingUnitIds.length === 0) {
-            return true;
-        }
-        
-        // 简单延时，避免过于密集的空转
-        await new Promise(r => setTimeout(r, 10));
+      } else {
+        // 读取失败(超时/离线)，视为"无法恢复"或"无需等待"
+        // 直接移除，避免因等待离线设备导致界面卡顿10秒
+        console.warn(`[恢复] Unit ${unitId} 读取失败，跳过等待`);
+        pendingUnitIds.splice(i, 1);
+      }
     }
-    
-    console.warn(`⚠️ [恢复] 超时 (${maxWrapperTime}ms)，强制退出`);
-    return false;
+
+    // 如果列表被清空，立即成功
+    if (pendingUnitIds.length === 0) {
+      return true;
+    }
+
+    // 简单延时，避免过于密集的空转
+    await new Promise(r => setTimeout(r, 10));
+  }
+
+  console.warn(`[恢复] 超时 (${maxWrapperTime}ms)，强制退出`);
+  return false;
 };
 
 // F1周期轮询 (新逻辑 2026-01-16)
 export const startF1CyclicPolling = async (
   connectionId: string,
   periodSeconds: number,
-  targetDevices?: string[], 
+  targetDevices?: string[],
   writeValue: number = 0x0001
 ): Promise<boolean> => {
   try {
@@ -568,114 +602,118 @@ export const startF1CyclicPolling = async (
     if (!shouldEnablePolling()) {
       return false;
     }
-    
+
     stopAllPolling();
-    
+
     const allConnections = getClientConnections();
     const targetConnection = allConnections.find(c => c.id === connectionId || c.connectionId === connectionId);
-    
+
     if (!targetConnection) {
-      console.warn(`⚠️ F1启动: 找不到连接 ${connectionId}`);
+      console.warn(`F1启动: 找不到连接 ${connectionId}`);
       return false;
     }
-    
+
     // 如果传入了目标设备列表，只轮询这些设备；否则轮询全部 24 个从机
     const unitIds = (targetDevices && targetDevices.length > 0)
       ? targetDevices.map(Number).filter(n => n >= 1 && n <= 24)
-      : Array.from({length: 24}, (_, i) => i + 1);
-    
+      : Array.from({ length: 24 }, (_, i) => i + 1);
+
     if (targetDevices && targetDevices.length > 0) {
-      console.log(`📋 [F1] 使用目标设备列表: [${unitIds.join(', ')}] (共 ${unitIds.length} 个)`);
+      console.log(`[F1] 使用目标设备列表: [${unitIds.join(', ')}] (共 ${unitIds.length} 个)`);
     }
 
-    console.log(`🔄 [F1 Start] 周期:${periodSeconds}s, Conn:${connectionId}, Units:1-24`);
+    console.log(` [F1 Start] 周期:${periodSeconds}s, Conn:${connectionId}, Units:1-24`);
 
     // 0. 初始恢复检查
     console.log(`Running initial recovery check...`);
     await recoverConnectionState(connectionId, unitIds);
-    
+
     // 增加短暂延时，平滑过渡到正常轮询
     await new Promise(r => setTimeout(r, 20));
 
-    // 1. 发送启动命令 (Write 0x0007 = Period, Unit FF)
+    // 1. 发送启动命令 (Write 0x0002 = Period, Unit FF)
     try {
-        const txId = getNextTransactionId();
-        await writeSingleRegisterWithFixedTxId(connectionId, txId, REGISTERS.CONTROL_CYCLE, periodSeconds, REGISTERS.BROADCAST_UNIT_ID);
-        console.log(`🚀 F1启动命令已发送 (Unit FF): 0x0007=${periodSeconds}`);
+      const txId = getNextTransactionId();
+      await writeSingleRegisterWithFixedTxId(connectionId, txId, REGISTERS.CONTROL_CYCLE, periodSeconds, REGISTERS.BROADCAST_UNIT_ID);
+      console.log(` F1启动命令已发送 (Unit FF): 0x0002=${periodSeconds}`);
     } catch (e) {
-        console.error(`❌ F1启动命令发送失败`, e);
-        return false;
+      console.error(` F1启动命令发送失败`, e);
+      return false;
     }
 
     // 2. 启动周期循环
     const controller = { active: true };
-    
+
     (async () => {
-        console.log(`� F1状态轮询循环已启动: 间隔50ms (Update 2026-01-17)`);
-        while (controller.active) {
-            const loopStart = Date.now();
-            let recoveryTriggered = false;
-            
-            // 轮询 1-12
-            for (const unitId of unitIds) {
-                if (!controller.active) break;
-                
-                // 2.1 直接读取完整数据 (0x0000-0x0007)
-                // 用户要求: 10ms快读与正常读保持一致，都读取所有寄存器
-                const data = await readDeviceData(connectionId, unitId);
-                
-                if (data) {
-                     const status = data.statusRegister;
+      console.log(` [F1]状态轮询循环已启动: 间隔50ms (Update 2026-01-17)`);
+      while (controller.active) {
+        const loopStart = Date.now();
+        let recoveryTriggered = false;
 
-                     if ((status & STATUS_MASK.COMM_TIMEOUT) !== 0) {
-                         console.warn(`⚠️ Unit ${unitId} 报告 COMM_TIMEOUT (0x${status.toString(16)}) -> 触发恢复流程`);
-                         recoveryTriggered = true;
-                         break; 
-                     }
-                }
-            }
-            
-            if (recoveryTriggered && controller.active) {
-                const io = getSocketIOInstance();
-                
-                // 1. 界面告警
-                io.emit('testStateChange', { state: 'COMM_ERROR', connectionId });
-                console.warn(`⚠️ [F1故障] 检测到通信错误，执行恢复流程: 停止 -> 恢复 -> 重启`);
+        // 轮询目标设备：先读状态寄存器，再按DATA_READY抓取完整数据
+        for (const unitId of unitIds) {
+          if (!controller.active) break;
 
-                // 2. 发送停止命令
-                try {
-                    const txId = getNextTransactionId();
-                    await writeSingleRegisterWithFixedTxId(connectionId, txId, REGISTERS.CONTROL_CYCLE, 0x0000, REGISTERS.BROADCAST_UNIT_ID);
-                } catch (e) { console.error(e); }
+          // 2.1 读取状态寄存器(0x0000)
+          const status = await readDeviceStatus(connectionId, unitId);
+          if (status === null) {
+            continue;
+          }
 
-                // 3. 执行快速恢复 (等待Cnt=0)
-                await recoverConnectionState(connectionId, unitIds);
-                
-                // 增加短暂延时，平滑过渡
-                await new Promise(r => setTimeout(r, 20));
+          if ((status & STATUS_MASK.COMM_TIMEOUT) !== 0) {
+            console.warn(`Unit ${unitId} 报告 COMM_TIMEOUT (0x${status.toString(16)}) -> 触发恢复流程`);
+            recoveryTriggered = true;
+            break;
+          }
 
-                // 4.恢复后重新发送启动
-                if (controller.active) {
-                    try {
-                        const txId = getNextTransactionId();
-                        await writeSingleRegisterWithFixedTxId(connectionId, txId, REGISTERS.CONTROL_CYCLE, periodSeconds, REGISTERS.BROADCAST_UNIT_ID);
-                        console.log(`🚀 [故障恢复] 重新发送启动命令`);
-                         io.emit('testStateChange', { state: 'TESTING', connectionId });
-                    } catch (e) { console.error(e); }
-                }
-            }
-            
-            // 3. 循环间隔控制 (50ms)
-            const elapsed = Date.now() - loopStart;
-            // 确保至少50ms间隔
-            const delay = Math.max(5, 50 - elapsed); 
-            if (controller.active) {
-                await new Promise(r => setTimeout(r, delay));
-            }
+          // 2.2 DATA_READY=1时再抓取完整数据(0x0000-0x000C)
+          if ((status & STATUS_MASK.DATA_READY) !== 0) {
+            await readDeviceData(connectionId, unitId, 'F1_POLLING');
+          }
         }
-        console.log(`⏹️ F1 轮询任务结束`);
+
+        if (recoveryTriggered && controller.active) {
+          const io = getSocketIOInstance();
+
+          // 1. 界面告警
+          io.emit('testStateChange', { state: 'COMM_ERROR', connectionId, testType: 'F1' });
+          console.warn(` [F1故障] 检测到通信错误，执行恢复流程: 停止 -> 恢复 -> 重启`);
+
+          // 2. 发送停止命令
+          try {
+            const txId = getNextTransactionId();
+            await writeSingleRegisterWithFixedTxId(connectionId, txId, REGISTERS.CONTROL_CYCLE, 0x0000, REGISTERS.BROADCAST_UNIT_ID);
+          } catch (e) { console.error(e); }
+
+          // 3. 执行快速恢复 (等待Cnt=0)
+          await recoverConnectionState(connectionId, unitIds);
+
+          // 增加短暂延时，平滑过渡
+          await new Promise(r => setTimeout(r, 20));
+
+          // 4.恢复后重新发送启动
+          if (controller.active) {
+            try {
+              const txId = getNextTransactionId();
+              await writeSingleRegisterWithFixedTxId(connectionId, txId, REGISTERS.CONTROL_CYCLE, periodSeconds, REGISTERS.BROADCAST_UNIT_ID);
+              console.log(` [故障恢复] 重新发送启动命令`);
+              io.emit('testStateChange', { state: 'TESTING', connectionId, testType: 'F1' });
+            } catch (e) { console.error(e); }
+          }
+        }
+
+        // 3. 循环间隔控制 (改为动态读取频率: T/3)
+        const elapsed = Date.now() - loopStart;
+        const intervalMs = Math.floor((periodSeconds * 1000) / 3);
+        // 确保至少有5ms间隔
+        const delay = Math.max(5, intervalMs - elapsed);
+        if (controller.active) {
+          await new Promise(r => setTimeout(r, delay));
+        }
+      }
+      console.log(` F1 轮询任务结束`);
     })();
-    
+
     pollingTimers.set(connectionId, {
       timer: null,
       type: 'F1',
@@ -683,97 +721,181 @@ export const startF1CyclicPolling = async (
       startTime: Date.now(),
       controller
     });
-    
+
     return true;
   } catch (error) {
-    console.error(`❌ F1周期轮询启动失败:`, error);
+    console.error(` F1周期轮询启动失败:`, error);
     return false;
   }
 };
 
 
-// F2快速轮询：写命令启动，每0.5秒读取一次，共60次，结束后冷却30s
+// F2快速轮询：写命令启动，静默25秒，随后每1秒检查TEST_DONE，成功后50ms读取60次，最后30秒冷却
 export const startF2FastPolling = async (connectionId: string, targetUnitId: number = 1): Promise<boolean> => {
   try {
+    const io = getSocketIOInstance();
+
     // 检查冷却时间
     const cooldownEnd = cooldowns.get(connectionId);
     if (cooldownEnd && Date.now() < cooldownEnd) {
       const remaining = Math.ceil((cooldownEnd - Date.now()) / 1000);
-      console.log(`⏳ F2测试冷却中 ${connectionId}: 剩余${remaining}秒`);
+      console.log(` F2测试冷却中 ${connectionId}: 剩余${remaining}秒`);
+      io?.emit('testStateChange', {
+        state: 'TESTING',
+        connectionId,
+        message: `F2快速测试处于冷却期，剩余${remaining}秒`,
+        testType: 'F2'
+      });
       return false;
     }
 
     // 检查是否应该启用轮询
     if (!shouldEnablePolling()) {
-      console.log(`❌ F2快速轮询启动被拒绝 ${connectionId}: 没有连接的设备`);
+      console.log(` F2快速轮询启动被拒绝 ${connectionId}: 没有连接的设备`);
       return false;
     }
-    
+
     // 停止现有轮询
     stopPolling(connectionId);
-    
-    console.log(`🚀 启动F2快速轮询 ${connectionId}: 写0x0001=1, 目标设备=${targetUnitId}, 每0.5s读取一次, 共60次`);
-    
-    // 1. 发送F2启动命令 (写 0x0001 = 1 到 CONTROL_A 0x0006)
+
+    console.log(` 启动F2快速轮询 ${connectionId}: 阶段1/发送启动信号`);
+
+    // 1. 发送F2启动命令 (写 0x0001 = 1 到 CONTROL_A 0x0001)
     const txId = getNextTransactionId();
-    // 使用 targetUnitId 发送启动命令，而不是广播
     await writeSingleRegisterWithFixedTxId(connectionId, txId, REGISTERS.CONTROL_A, 0x0001, targetUnitId);
-    console.log(`✅ F2启动命令已发送 ${connectionId} (UnitID=${targetUnitId}, Reg=0x0006, Val=1)`);
-    
-    const startTime = Date.now();
-    let readCount = 0;
-    const maxReads = 60;
-    
-    // 2. 创建快速轮询定时器 (每500ms)
-    const intervalMs = 500;
-    const timer = setInterval(async () => {
-      try {
-        readCount++;
-        console.log(`📊 F2读取 ${connectionId} Unit:${targetUnitId} [${readCount}/${maxReads}]`);
-        
-        // 读取指定设备数据
-        await readDeviceData(connectionId, targetUnitId);
-        
-        // 检查是否达到最大读取次数
-        if (readCount >= maxReads) {
-          console.log(`⏹️ F2测试完成 ${connectionId} (已读取${maxReads}次)`);
-          stopPolling(connectionId);
-          
-          // 设置冷却时间 30秒
-          const cooldownDuration = 30000;
-          cooldowns.set(connectionId, Date.now() + cooldownDuration);
-          
-          // 发送完成事件
-          const io = getSocketIOInstance();
-          if (io) {
-            io.emit('testCompleted', {
-              testType: 'F2',
-              deviceId: connectionId,
-              validDataCount: readCount,
-              timestamp: new Date().toISOString(),
-              cooldown: 30
-            });
-          }
-        }
-      } catch (error) {
-        // console.error(`❌ F2轮询失败 ${connectionId}:`, error);
-      }
-    }, intervalMs);
-    
-    // 保存定时器
-    pollingTimers.set(connectionId, {
-      timer,
-      type: 'F2',
+    console.log(` F2启动命令已发送 ${connectionId} (UnitID=${targetUnitId}, Reg=0x0001, Val=1)`);
+    io?.emit('testStateChange', {
+      state: 'TESTING',
       connectionId,
-      targetUnitId,
-      startTime,
-      readCount: 0
+      message: '阶段2：命令写入成功，正在进行F2快速测试',
+      testType: 'F2'
     });
-    
+
+    const startTime = Date.now();
+
+    // 我们在这里使用异步自执行闭包，不堵塞轮询管理，独立运行F2全套阶段
+    (async () => {
+      try {
+        console.log(` F2快速轮询 ${connectionId}: 阶段2/进入25秒静默等待大循环...`);
+        // 25秒静默等待
+        await new Promise(r => setTimeout(r, 25000));
+        console.log(` F2快速轮询 ${connectionId}: 25秒静默结束，阶段3/开始探测状态寄存器TEST_DONE位`);
+        io?.emit('testStateChange', {
+          state: 'TESTING',
+          connectionId,
+          message: '25秒静默期结束，开始每秒检测 test_done',
+          testType: 'F2'
+        });
+
+        // 探测阶段：每秒读一次 0x0000 直到获得 TEST_DONE 或超时 (最多给10次=10秒)
+        let isDone = false;
+        for (let i = 0; i < 10; i++) {
+          const sBuf = await readHoldingRegistersWithFixedTxId(connectionId, getNextTransactionId(), REGISTERS.STATUS, 1, targetUnitId);
+          if (sBuf && sBuf.length >= 2) {
+            const stValue = sBuf.readUInt16BE(0);
+            const testDone = (stValue & STATUS_MASK.TEST_DONE) !== 0;
+            console.log(` F2快速轮询 ${connectionId}: test_done=${testDone ? 1 : 0}, status=0x${stValue.toString(16).padStart(4, '0')}`);
+            io?.emit('testStateChange', {
+              state: 'TESTING',
+              connectionId,
+              message: `test_done = ${testDone ? 1 : 0}`,
+              testType: 'F2'
+            });
+
+            if (testDone) {
+              console.log(` F2快速轮询 ${connectionId}: test_done = 1，快速测试流程结束，开始接收数据`);
+              // 首次检测到 TEST_DONE=1 时立即开始 30 秒冷却，
+              // 这样前端可以在“读取数据”阶段同步展示冷却倒计时。
+              const cooldownDurationMs = 30000;
+              const cooldownSeconds = Math.ceil(cooldownDurationMs / 1000);
+              cooldowns.set(connectionId, Date.now() + cooldownDurationMs);
+              io?.emit('testStateChange', {
+                state: 'TESTING',
+                connectionId,
+                message: 'TEST_DONE = 1，开始获取数据',
+                testType: 'F2',
+                cooldownSeconds
+              });
+              isDone = true;
+              break;
+            }
+          }
+          await new Promise(r => setTimeout(r, 1000));
+        }
+
+        if (!isDone) {
+          console.warn(` F2快速轮询 ${connectionId}: 测试等待超时，放弃本次数据收取`);
+          io?.emit('testStateChange', {
+            state: 'IDLE',
+            connectionId,
+            message: 'F2快速测试等待 test_done 超时，请重试',
+            testType: 'F2'
+          });
+          return;
+        }
+
+        // 阶段4: 数据收割 (每50ms收割一次)
+        console.log(` F2快速轮询 ${connectionId}: 开始50ms高频数据收割，限额60次`);
+        let readCount = 0;
+        const maxReads = 60;
+
+        const harvestTimer = setInterval(async () => {
+          try {
+            readCount++;
+            await readDeviceData(connectionId, targetUnitId);
+
+            if (readCount >= maxReads) {
+              clearInterval(harvestTimer);
+              console.log(` F2快速轮询 ${connectionId}: 60次数据收割完毕`);
+
+              // 停止此设备相关的记录状态
+              stopPolling(connectionId);
+
+              io?.emit('testStateChange', {
+                state: 'TESTING',
+                connectionId,
+                message: '数据读取结束，共六十条',
+                testType: 'F2'
+              });
+
+              // 发送完成事件
+              const cooldownEndTs = cooldowns.get(connectionId) || Date.now();
+              const remainingCooldown = Math.max(0, Math.ceil((cooldownEndTs - Date.now()) / 1000));
+              if (io) {
+                io.emit('testCompleted', {
+                  testType: 'F2',
+                  deviceId: connectionId,
+                  validDataCount: readCount,
+                  timestamp: new Date().toISOString(),
+                  cooldown: remainingCooldown
+                });
+              }
+            }
+          } catch (e) {
+            console.error('获取数据出错', e);
+          }
+        }, 50); // 50ms
+
+        // 注册到系统，让stopPolling能强制干掉它
+        pollingTimers.set(connectionId, {
+          timer: harvestTimer,
+          type: 'F2',
+          connectionId,
+          targetUnitId,
+          startTime,
+          readCount: 0
+        });
+
+      } catch (err) {
+        console.error(` F2全流程执行失败 ${connectionId}:`, err);
+      }
+    })();
+
+    // 立刻返回True，通知UI已成功触发测试
     return true;
-    
+
   } catch (error) {
-    console.error(`❌ F2快速轮询启动失败 ${connectionId}:`, error);
+    console.error(` F2快速轮询启动失败 ${connectionId}:`, error);
     return false;
   }
 };
@@ -785,31 +907,31 @@ export const stopPolling = (connectionId: string): boolean => {
     if (pollingInfo.timer) clearInterval(pollingInfo.timer);
     if (pollingInfo.controller) pollingInfo.controller.active = false; // 停止异步循环
     pollingTimers.delete(connectionId);
-    
+
     // 如果是F1轮询，还需要发送停止命令 (写 0x0002 = 0)
     if (pollingInfo.type === 'F1') {
-       const connections = getClientConnections();
-       connections.forEach(conn => {
-         if (conn.isConnected) {
-            const txId = getNextTransactionId();
-            writeSingleRegisterWithFixedTxId(conn.id, txId, REGISTERS.CONTROL_B, 0x0000)
-              .catch(e => console.error(`F1停止命令发送失败 ${conn.id}:`, e));
-         }
-       });
+      const connections = getClientConnections();
+      connections.forEach(conn => {
+        if (conn.isConnected) {
+          const txId = getNextTransactionId();
+          writeSingleRegisterWithFixedTxId(conn.id, txId, REGISTERS.CONTROL_B, 0x0000)
+            .catch(e => console.error(`F1停止命令发送失败 ${conn.id}:`, e));
+        }
+      });
     } else if (pollingInfo.type === 'F2') {
-       // F2 停止命令: 写 0x0000 到 CONTROL_A 0x0006 以停止测试 (针对特定 targetUnitId)
-       const connections = getClientConnections();
-       connections.forEach(conn => {
-         if (conn.isConnected) {
-            const txId = getNextTransactionId();
-            const targetUnitId = pollingInfo.targetUnitId;
-            writeSingleRegisterWithFixedTxId(conn.id, txId, REGISTERS.CONTROL_A, 0x0000, targetUnitId)
-              .catch(e => console.error(`F2停止命令发送失败 ${conn.id}:`, e));
-         }
-       });
+      // F2 停止命令: 写 0x0000 到 CONTROL_A 0x0006 以停止测试 (针对特定 targetUnitId)
+      const connections = getClientConnections();
+      connections.forEach(conn => {
+        if (conn.isConnected) {
+          const txId = getNextTransactionId();
+          const targetUnitId = pollingInfo.targetUnitId;
+          writeSingleRegisterWithFixedTxId(conn.id, txId, REGISTERS.CONTROL_A, 0x0000, targetUnitId)
+            .catch(e => console.error(`F2停止命令发送失败 ${conn.id}:`, e));
+        }
+      });
     }
-    
-    console.log(`⏹️ ${pollingInfo.type}轮询已停止 ${connectionId}`);
+
+    console.log(` ${pollingInfo.type}轮询已停止 ${connectionId}`);
     return true;
   }
   return false;
@@ -817,24 +939,24 @@ export const stopPolling = (connectionId: string): boolean => {
 
 // 停止所有轮询
 export const stopAllPolling = (): void => {
-  console.log(`⏹️ 停止所有轮询，共${pollingTimers.size}个`);
+  console.log(` 停止所有轮询，共${pollingTimers.size}个`);
   for (const [connectionId, pollingInfo] of pollingTimers) {
     // 停止主定时器
     if (pollingInfo.timer) clearInterval(pollingInfo.timer);
     if (pollingInfo.controller) pollingInfo.controller.active = false; // 停止异步循环
-    
+
     // 如果是F1轮询，还需要停止读取定时器
     if (pollingInfo.readTimer) {
       clearInterval(pollingInfo.readTimer);
     }
-    
-    console.log(`⏹️ 已停止${pollingInfo.type}轮询 ${connectionId}`);
+
+    console.log(` 已停止${pollingInfo.type}轮询 ${connectionId}`);
   }
   pollingTimers.clear();
 };
 
 // 获取轮询状态
-export const getPollingStatus = (): Array<{connectionId: string, type: 'F1' | 'F2', startTime: number, elapsed: number, readCount?: number}> => {
+export const getPollingStatus = (): Array<{ connectionId: string, type: 'F1' | 'F2', startTime: number, elapsed: number, readCount?: number }> => {
   const status = [];
   for (const [connectionId, pollingInfo] of pollingTimers) {
     status.push({
@@ -858,32 +980,32 @@ export const getF2TargetUnitId = (connectionId: string): number | undefined => {
 };
 
 // 批量轮询：对所有连接的设备启动轮询
-export const startBatchPolling = async (type: 'F1' | 'F2', periodSeconds?: number): Promise<{success: number, failed: number, results: Array<{connectionId: string, success: boolean, error?: string}>}> => {
+export const startBatchPolling = async (type: 'F1' | 'F2', periodSeconds?: number): Promise<{ success: number, failed: number, results: Array<{ connectionId: string, success: boolean, error?: string }> }> => {
   // 检查是否应该启用轮询（只有连接设备数量大于1时才启用）
   if (!shouldEnablePolling()) {
-    console.log(`❌ 批量轮询启动被拒绝: 连接设备数量不大于1台`);
+    console.log(` 批量轮询启动被拒绝: 连接设备数量不大于1台`);
     return { success: 0, failed: 0, results: [] };
   }
-  
+
   const connections = getClientConnections();
   const activeConnections = connections.filter(conn => conn.isConnected);
-  
-  console.log(`🔄 开始批量${type}轮询，共${activeConnections.length}个设备`);
-  
+
+  console.log(` 开始批量${type}轮询，共${activeConnections.length}个设备`);
+
   const results = [];
   let successCount = 0;
   let failedCount = 0;
-  
+
   for (const connection of activeConnections) {
     try {
       let success = false;
-      
+
       if (type === 'F1') {
         success = await startF1CyclicPolling(connection.connectionId, periodSeconds || 3, undefined, 0x0001); // 默认3秒间隔
       } else if (type === 'F2') {
         success = await startF2FastPolling(connection.connectionId);
       }
-      
+
       if (success) {
         successCount++;
         results.push({ connectionId: connection.connectionId, success: true });
@@ -891,17 +1013,17 @@ export const startBatchPolling = async (type: 'F1' | 'F2', periodSeconds?: numbe
         failedCount++;
         results.push({ connectionId: connection.connectionId, success: false, error: '启动失败' });
       }
-      
+
     } catch (error) {
       failedCount++;
-      results.push({ 
-        connectionId: connection.connectionId, 
-        success: false, 
+      results.push({
+        connectionId: connection.connectionId,
+        success: false,
         error: error instanceof Error ? error.message : String(error)
       });
     }
   }
-  
+
   return { success: successCount, failed: failedCount, results };
 };
 
@@ -922,7 +1044,7 @@ export const testNewProtocolFormat = () => {
   console.log("  0x000A: 电池4阻抗 R1");
   console.log("  0x000B: 电池4阻抗 R2");
   console.log("  0x000C: 电池4阻抗 R3");
-  
+
   return {
     message: "新协议格式说明已输出到控制台"
   };
@@ -930,5 +1052,5 @@ export const testNewProtocolFormat = () => {
 
 // 更新读取策略 (Stub)
 export const updateReadStrategy = () => {
-    return { type: 'auto' };
+  return { type: 'auto' };
 }

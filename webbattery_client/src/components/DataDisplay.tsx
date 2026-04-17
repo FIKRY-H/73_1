@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   Box,
   Paper,
@@ -25,7 +25,11 @@ import {
   Grid,
   LinearProgress,
   Tabs,
-  Tab
+  Tab,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -75,6 +79,8 @@ interface PingSubnetResult {
 
 
 const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
+  const F2_COOLDOWN_SECONDS = 30;
+  const F2_TEST_SECONDS = 30;
   const { clearBatteryData } = useBatteryData();
   const { isConnected, socket, clients } = useSocket();
   // const [filteredData, setFilteredData] = useState<any[]>([]);
@@ -89,12 +95,13 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
     statusBits: {
       measEnable: false,
       measRunning: false,
-      alarmDevOv: false,
       alarmCell1Ov: false,
       alarmCell1Uv: false,
       commTimeout: false,
+      testDone: false,
       forceStopped: false,
       dataReady: false,
+      commError: false,
       rawValue: 0,
       binaryString: '0000000000000000'
     }
@@ -122,9 +129,10 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
   // 测试控制状态 - 简化的互锁逻辑
   const [selectedDevices, setSelectedDevices] = useState<string[]>([]);
   const [lastCommandResult, setLastCommandResult] = useState<string>('');
-  const [loopIntervalTime, setLoopIntervalTime] = useState<number>(1); // 周期测试时间（秒），范围1-60
+  const [loopIntervalTime, setLoopIntervalTime] = useState<number>(3); // 周期测试时间（秒），范围3-60
   // 输入框字符串态，允许清空
-  const [loopIntervalInput, setLoopIntervalInput] = useState<string>('1');
+  const [loopIntervalInput, setLoopIntervalInput] = useState<string>('3');
+  const [fastTestDeviceId, setFastTestDeviceId] = useState<number>(1); // F2快速测试目标设备号
 
 
   /*
@@ -152,6 +160,10 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
     activeF1Mode: null,
     testStatus: 'idle'
   });
+  const prevF2CooldownTimeRef = useRef<number>(0);
+  const [f2TestingTimeLeft, setF2TestingTimeLeft] = useState<number>(0);
+  const [isF2ReadResultLocked, setIsF2ReadResultLocked] = useState<boolean>(false);
+  const [f2TestDoneValue, setF2TestDoneValue] = useState<0 | 1 | null>(null);
 
   // 设备在线状态（扫描后填充）
   const [onlineDevices, setOnlineDevices] = useState<number[]>([]);
@@ -182,7 +194,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
       });
       const result = await response.json();
       console.log(`[Scan] 后端响应:`, result);
-      
+
       if (result.success) {
         setSuccess(`扫描完成，发现 ${result.data?.onlineDevices?.length || 0} 个在线设备`);
         setLastCommandResult(`✅ 扫描完成: 发现 ${result.data?.onlineDevices?.length || 0} 个在线设备`);
@@ -199,6 +211,12 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
 
   // 检查当前选中的设备是否离线 (>12s无数据)
   const [isSelectedDeviceOffline, setIsSelectedDeviceOffline] = useState(false);
+
+  const getEffectiveLoopPeriodSeconds = useCallback(() => {
+    const raw = (loopIntervalInput ?? '').trim();
+    const value = raw === '' ? 3 : (loopIntervalTime || 3);
+    return Math.max(3, Math.min(60, value));
+  }, [loopIntervalInput, loopIntervalTime]);
 
   useEffect(() => {
     const checkOffline = () => {
@@ -221,8 +239,34 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
   // 监听后端测试状态变更
   useEffect(() => {
     if (!socket) return;
-    const handleTestStateChange = (payload: { state: string, connectionId?: string }) => {
+    const handleTestStateChange = (payload: { state: string, connectionId?: string, message?: string, testType?: string, cooldownSeconds?: number }) => {
       console.log("Test State Change:", payload);
+
+      const testDoneMatch = payload.message?.match(/test[_\s-]*done\s*=\s*([01])/i);
+      if (testDoneMatch) {
+        setF2TestDoneValue(testDoneMatch[1] === '1' ? 1 : 0);
+      }
+
+      if (payload.message) {
+        const shouldHoldReadResult = isF2ReadResultLocked && testingState.isF2Testing && testingState.f2CooldownTime > 0;
+        // 冷却期内锁定“数据读取结束”文案，避免被 testStateChange 的过程消息覆盖。
+        if (!shouldHoldReadResult) {
+          setLastCommandResult(payload.message);
+        }
+      }
+
+      if (payload.testType === 'F2' && payload.state === 'TESTING' && (payload.cooldownSeconds ?? 0) > 0) {
+        // 后端在首次检测到 TEST_DONE=1 时下发 cooldownSeconds，前端立即进入冷却倒计时。
+        setF2TestingTimeLeft(0);
+        setF2TestDoneValue(1);
+        setLastCommandResult('正在获取数据');
+        setTestingState(prev => ({
+          ...prev,
+          isF2Testing: true,
+          f2CooldownTime: prev.f2CooldownTime > 0 ? prev.f2CooldownTime : (payload.cooldownSeconds || 0)
+        }));
+      }
+
       if (payload.state === 'COMM_ERROR') {
         setTestingState(prev => ({
           ...prev,
@@ -232,7 +276,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
           // 用户反馈说"测试按钮没有恢复"，可能因为这里之前的逻辑把它设为 false 了
           // isF1Testing: false // Don't disable testing mode, just mark as error
         }));
-        setLastCommandResult(`❌ 设备 ${payload.connectionId} 通讯异常，正在尝试恢复...`);
+        setLastCommandResult(`设备 ${payload.connectionId} 通讯异常，正在尝试恢复...`);
       } else if (payload.state === 'IDLE' || payload.state === 'RECOVERY_COMPLETE') {
         setTestingState(prev => ({
           ...prev,
@@ -242,18 +286,25 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
           isF1Testing: payload.state === 'IDLE' ? false : prev.isF1Testing
         }));
         if (payload.state === 'RECOVERY_COMPLETE') {
-          setLastCommandResult(`✅ 设备 ${payload.connectionId} 通讯已恢复，准备就绪`);
+          setLastCommandResult(`设备 ${payload.connectionId} 通讯已恢复，准备就绪`);
         }
       } else if (payload.state === 'TESTING') {
         // 接收到 TESTING 状态，恢复界面为正常测试中
-        setTestingState(prev => ({
-          ...prev,
-          testStatus: 'testing',
-          isF1Testing: true,
-          activeF1Mode: prev.activeF1Mode || 'cyclic', // 恢复之前的模式，或默认为 cyclic
-          errorConnectionId: undefined
-        }));
-        setLastCommandResult(`✅ 设备 ${payload.connectionId} 恢复正常测试流程`);
+        setTestingState(prev => {
+          const isF1 = payload.testType === 'F1' || (!payload.testType && !prev.isF2Testing);
+          const isF2 = payload.testType === 'F2' || (!payload.testType && prev.isF2Testing);
+          return {
+            ...prev,
+            testStatus: 'testing',
+            isF1Testing: isF1 ? true : prev.isF1Testing,
+            isF2Testing: isF2 ? true : prev.isF2Testing,
+            activeF1Mode: isF1 ? (prev.activeF1Mode || 'cyclic') : prev.activeF1Mode,
+            errorConnectionId: undefined
+          };
+        });
+        if (!payload.message) {
+          setLastCommandResult(`设备 ${payload.connectionId} 处于测试中`);
+        }
       }
     };
     socket.on('testStateChange', handleTestStateChange);
@@ -261,7 +312,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
     return () => {
       socket.off('testStateChange', handleTestStateChange);
     }
-  }, [socket]);
+  }, [socket, isF2ReadResultLocked, testingState.isF2Testing, testingState.f2CooldownTime]);
 
 
   /*
@@ -285,6 +336,17 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
       return () => clearTimeout(timer);
     }
   }, [testingState.f2CooldownTime]);
+
+  // F2快速测试阶段倒计时（25秒）
+  useEffect(() => {
+    if (testingState.isF2Testing && testingState.f2CooldownTime === 0 && f2TestingTimeLeft > 0) {
+      const timer = setTimeout(() => {
+        setF2TestingTimeLeft(prev => Math.max(0, prev - 1));
+      }, 1000);
+
+      return () => clearTimeout(timer);
+    }
+  }, [testingState.isF2Testing, testingState.f2CooldownTime, f2TestingTimeLeft]);
 
   // 动态省略号动画状态（不直接渲染，忽略局部变量）
   const [, setDotAnimation] = useState('');
@@ -385,12 +447,13 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
       statusBits: {
         measEnable: false,
         measRunning: false,
-        alarmDevOv: false,
         alarmCell1Ov: false,
         alarmCell1Uv: false,
         commTimeout: false,
+        testDone: false,
         forceStopped: false,
         dataReady: false,
+        commError: false,
         rawValue: 0,
         binaryString: '0000000000000000'
       }
@@ -399,9 +462,19 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
 
   // 当F2冷却时间结束时重置寄存器状态并清除F2测试状态
   useEffect(() => {
-    if (testingState.f2CooldownTime <= 0 && testingState.isF2Testing) {
+    const prevCooldownTime = prevF2CooldownTimeRef.current;
+    const currentCooldownTime = testingState.f2CooldownTime;
+    prevF2CooldownTimeRef.current = currentCooldownTime;
+
+    // 仅在冷却倒计时由正数降到0时释放F2状态，避免启动F2时被立即复位。
+    const cooldownJustEnded = prevCooldownTime > 0 && currentCooldownTime <= 0;
+    if (cooldownJustEnded && testingState.isF2Testing) {
       console.log('F2冷却时间结束，重置寄存器状态并释放F1按钮');
       resetRegisterStatus();
+      setLastCommandResult('冷却保护结束，可以进行新的测试');
+      setF2TestingTimeLeft(0);
+      setIsF2ReadResultLocked(false);
+      setF2TestDoneValue(null);
 
       // 清除F2测试状态，释放F1按钮
       setTestingState(prev => ({
@@ -444,7 +517,9 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
           return;
         }
 
-        // 根据测试类型决定是否过滤dataready=0的数据
+        // 根据测试类型决定显示策略
+        // F1(周期): 由后端按DATA_READY门控，前端不过滤
+        // F2(快速): 由后端TEST_DONE流程收割，前端不过滤DATA_READY
         const testType = actualData.testType || actualData.frameType;
         const isCyclicTest = testType === 'CyclicTest' || testType === '周期测试' || testType === 170 || testType === 0xAA;
         const isFastTest = testType === 'FastTest' || testType === '快速测试' || testType === 250 || testType === 0xFA;
@@ -459,13 +534,10 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
           dataReadyValue = actualData.dataready;
         }
 
-        if (isFastTest && !dataReadyValue) {
-          console.log('快速测试：跳过dataready=false的数据，不添加到显示列表:', actualData);
-          return;
-        }
-
         if (isCyclicTest) {
-          console.log('周期测试：显示所有数据，包括dataready=false的数据，dataready值:', dataReadyValue);
+          console.log('周期测试：显示后端筛选后的有效数据，DATA_READY值:', dataReadyValue);
+        } else if (isFastTest) {
+          console.log('快速测试：显示TEST_DONE流程收割数据，DATA_READY值:', dataReadyValue);
         }
 
         console.log('接收到电池数据，测试类型:', testType, 'dataready值:', dataReadyValue);
@@ -625,6 +697,23 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
       setLastRefresh(new Date());
     };
 
+    const handleStartF2FastTestResponse = (data: any) => {
+      if (data?.success) {
+        setSuccess(data.message || 'F2快速测试已启动');
+        setLastCommandResult('命令写入成功，正在进行F2快速测试');
+        setF2TestingTimeLeft(F2_TEST_SECONDS);
+        setIsF2ReadResultLocked(false);
+        setF2TestDoneValue(0);
+      } else {
+        setError(data?.message || 'F2快速测试启动失败');
+        setLastCommandResult(`${data?.message || 'F2快速测试启动失败'}`);
+        setF2TestingTimeLeft(0);
+        setIsF2ReadResultLocked(false);
+        setF2TestDoneValue(null);
+        setTestingState(prev => ({ ...prev, isF2Testing: false, f2CooldownTime: 0 }));
+      }
+    };
+
     // 监听多个事件名称以确保兼容性
     socket.on('batteryDataUpdate', handleBatteryDataUpdate);
     socket.on('batteryUpdate', handleBatteryDataUpdate); // 保持向后兼容
@@ -722,6 +811,8 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
       setError(`轮询错误 (设备 ${data.deviceId}): ${data.error}`);
     });
 
+    socket.on('startF2FastTestResponse', handleStartF2FastTestResponse);
+
     socket.on('deviceStatusChanged', (data) => {
       console.log('设备状态变化:', data);
       // 可以在这里更新设备状态显示
@@ -729,7 +820,14 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
 
     socket.on('testCompleted', (data) => {
       console.log('测试完成:', data);
-      setSuccess(`设备 ${data.deviceId} 的 ${data.testType} 测试完成`);
+
+      if (data.testType === 'F2') {
+        setLastCommandResult('数据读取结束，共六十条');
+        setF2TestingTimeLeft(0);
+        setIsF2ReadResultLocked(true);
+      } else {
+        setSuccess(`设备 ${data.deviceId} 的 ${data.testType} 测试完成`);
+      }
 
       // 清除对应测试类型的状态
       if (data.testType === 'F1') {
@@ -753,9 +851,9 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
             ...prev,
             testingDevices: newTestingDevices,
             // 即使所有设备都完成了，也不要清除 isF2Testing 状态，
-            // 并将冷却时间重置为30秒，实现测试结束后30秒冷却
+            // 冷却从首次 TEST_DONE=1 开始计时，若未收到该事件则回退为30秒。
             isF2Testing: true,
-            f2CooldownTime: 30
+            f2CooldownTime: prev.f2CooldownTime > 0 ? prev.f2CooldownTime : F2_COOLDOWN_SECONDS
           };
         });
         console.log(`已清除设备 ${data.deviceId} 的F2测试状态，开始30秒冷却`);
@@ -779,6 +877,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
       socket.off('pollingStopped');
       socket.off('devicePolled');
       socket.off('pollingError');
+      socket.off('startF2FastTestResponse', handleStartF2FastTestResponse);
       socket.off('deviceStatusChanged');
       socket.off('testCompleted');
     };
@@ -954,10 +1053,12 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
   const parsedStatusDisplay = {
     measEnable: (displayStatusRawValue & 0x0001) !== 0,
     measRunning: (displayStatusRawValue & 0x0002) !== 0,
-    alarmDevOv: (displayStatusRawValue & 0x0004) !== 0,
-    alarmCell1Ov: (displayStatusRawValue & 0x0008) !== 0,
-    alarmCell1Uv: (displayStatusRawValue & 0x0010) !== 0,
-    commTimeout: (displayStatusRawValue & 0x0020) !== 0,
+    // 协议文档未定义独立的 COOLDOWN_LOCKED 位，前端使用本地倒计时表示冷却期
+    cooldownLocked: testingState.f2CooldownTime > 0,
+    alarmCell1Ov: (displayStatusRawValue & 0x0004) !== 0,
+    alarmCell1Uv: (displayStatusRawValue & 0x0008) !== 0,
+    commTimeout: (displayStatusRawValue & 0x0010) !== 0,
+    testDone: (displayStatusRawValue & 0x0020) !== 0,
     forceStopped: (displayStatusRawValue & 0x0040) !== 0,
     dataReady: (displayStatusRawValue & 0x0080) !== 0,
     commError: (displayStatusRawValue & 0x0100) !== 0,
@@ -1092,6 +1193,9 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
     return isNaN(n) ? String(raw) : n;
   };
 
+  const hasValue = (value: any): boolean => value !== undefined && value !== null;
+  const firstDefined = (...values: any[]) => values.find(hasValue);
+
   const renderDataTable = (data: any[]) => {
     return (
       <TableContainer component={Paper}>
@@ -1105,12 +1209,18 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
               <TableCell>Bat1 R1(μΩ)</TableCell>
               <TableCell>Bat1 R2(μΩ)</TableCell>
               <TableCell>Bat1 R3(μΩ)</TableCell>
+              <TableCell>Bat3 R1(μΩ)</TableCell>
+              <TableCell>Bat3 R2(μΩ)</TableCell>
+              <TableCell>Bat3 R3(μΩ)</TableCell>
+              <TableCell>Bat4 R1(μΩ)</TableCell>
+              <TableCell>Bat4 R2(μΩ)</TableCell>
+              <TableCell>Bat4 R3(μΩ)</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
             {data.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={7} align="center">
+                <TableCell colSpan={13} align="center">
                   <Typography variant="body2" color="text.secondary">
                     {isConnected ? '暂无实时数据' : '未连接到服务器'}
                   </Typography>
@@ -1137,9 +1247,19 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
                   <TableCell>{formatValue(row.voltage, 'mV', 0)}</TableCell>
 
                   {/* Bat1 */}
-                  <TableCell>{(row.r_ohm?.actual || row.r1?.actual) ? formatValue(row.r_ohm?.actual || row.r1?.actual, '', 0) : '-'}</TableCell>
-                  <TableCell>{(row.r_sei?.actual || row.r2?.actual) ? formatValue(row.r_sei?.actual || row.r2?.actual, '', 0) : '-'}</TableCell>
-                  <TableCell>{(row.r_ct?.actual || row.r3?.actual) ? formatValue(row.r_ct?.actual || row.r3?.actual, '', 0) : '-'}</TableCell>
+                  <TableCell>{hasValue(firstDefined(row.r_ohm?.actual, row.r1?.actual)) ? formatValue(firstDefined(row.r_ohm?.actual, row.r1?.actual), '', 0) : '-'}</TableCell>
+                  <TableCell>{hasValue(firstDefined(row.r_sei?.actual, row.r2?.actual)) ? formatValue(firstDefined(row.r_sei?.actual, row.r2?.actual), '', 0) : '-'}</TableCell>
+                  <TableCell>{hasValue(firstDefined(row.r_ct?.actual, row.r3?.actual)) ? formatValue(firstDefined(row.r_ct?.actual, row.r3?.actual), '', 0) : '-'}</TableCell>
+
+                  {/* Bat3 */}
+                  <TableCell>{hasValue(row.bat3_r1?.actual) ? formatValue(row.bat3_r1.actual, '', 0) : '-'}</TableCell>
+                  <TableCell>{hasValue(row.bat3_r2?.actual) ? formatValue(row.bat3_r2.actual, '', 0) : '-'}</TableCell>
+                  <TableCell>{hasValue(row.bat3_r3?.actual) ? formatValue(row.bat3_r3.actual, '', 0) : '-'}</TableCell>
+
+                  {/* Bat4 */}
+                  <TableCell>{hasValue(row.bat4_r1?.actual) ? formatValue(row.bat4_r1.actual, '', 0) : '-'}</TableCell>
+                  <TableCell>{hasValue(row.bat4_r2?.actual) ? formatValue(row.bat4_r2.actual, '', 0) : '-'}</TableCell>
+                  <TableCell>{hasValue(row.bat4_r3?.actual) ? formatValue(row.bat4_r3.actual, '', 0) : '-'}</TableCell>
                 </TableRow>
               ))
             )}
@@ -1335,7 +1455,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
 
         const firstConnected = clients.find(c => c.isConnected && c.id);
         const connectionIdToStop = firstConnected ? firstConnected.id : null;
-        
+
         const results = [];
         if (connectionIdToStop) {
           const success = await handleStopCyclicTest(connectionIdToStop);
@@ -1393,7 +1513,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
         body: JSON.stringify({
           deviceId: representativeDeviceId,
           selectedDevices: selectedDevices,
-          periodSeconds: ((loopIntervalInput ?? '').trim() === '' ? 1 : (loopIntervalTime || 1))
+          periodSeconds: getEffectiveLoopPeriodSeconds()
         })
       });
 
@@ -1409,7 +1529,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
           testStatus: 'testing'
         }));
         setSuccess('F1广播周期测试启动成功');
-        setLastCommandResult(`✅ F1广播周期测试启动成功 - 每${(loopIntervalInput ?? '').trim() === '' ? 1 : (loopIntervalTime || 1)}秒广播写命令并轮询读取 - 再次点击可停止`);
+        setLastCommandResult(`F1广播周期测试启动成功 - 每${getEffectiveLoopPeriodSeconds()}秒广播写命令并轮询读取 - 再次点击可停止`);
       } else {
         setError(`F1广播周期测试启动失败: ${result.message || '未知错误'}`);
         setLastCommandResult(`❌ F1广播周期测试启动失败: ${result.message || '未知错误'}`);
@@ -1428,7 +1548,68 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
     } finally {
       setIsLoading(false);
     }
-  }, [selectedDevices, testingState.isF1Testing, testingState.isF2Testing, testingState.testingDevices, loopIntervalTime, handleStopCyclicTest, resetRegisterStatus, testingState.testStatus]);
+  }, [selectedDevices, testingState.isF1Testing, testingState.isF2Testing, testingState.testingDevices, handleStopCyclicTest, resetRegisterStatus, testingState.testStatus, clients, socket, getEffectiveLoopPeriodSeconds]);
+
+  // F2测试（写命令启动，由后端静默等待25s，并随后监控TEST_DONE进入高频捞取数据）
+  const handleF2Test = useCallback(async () => {
+    if (testingState.isF1Testing) {
+      setError('无法启动F2测试：正在进行F1测试');
+      return;
+    }
+
+    if (testingState.isF2Testing) {
+      // 停止F2测试
+      try {
+        setIsLoading(true);
+        const firstConnected = clients.find(c => c.isConnected && c.id)
+          || modbusConnections.find((c: any) => c.isConnected && c.id);
+        const connectionIdToStop = firstConnected ? firstConnected.id : null;
+        if (connectionIdToStop && socket) {
+          socket.emit('stopTest', { connectionId: connectionIdToStop });
+          setSuccess('停止F2测试命令已发送');
+          setF2TestingTimeLeft(0);
+          setIsF2ReadResultLocked(false);
+          setF2TestDoneValue(null);
+          setTestingState(prev => ({ ...prev, isF2Testing: false, f2CooldownTime: 0 }));
+        }
+      } catch (err) {
+        setError('停止F2测试失败: ' + err);
+      } finally {
+        setIsLoading(false);
+      }
+      return;
+    }
+
+    // 启动F2测试
+    try {
+      setIsLoading(true);
+      const firstConnected = clients.find(c => c.isConnected && c.id)
+        || modbusConnections.find((c: any) => c.isConnected && c.id);
+      if (!firstConnected) {
+        setError('没有已连接的通信通道，无法启动测试');
+        setLastCommandResult('没有已连接的通信通道，无法启动F2测试');
+        return;
+      }
+
+      setTestingState(prev => ({ ...prev, isF2Testing: true }));
+      setF2TestingTimeLeft(0);
+      setIsF2ReadResultLocked(false);
+      setF2TestDoneValue(0);
+      setLastCommandResult('正在发送F2启动命令');
+
+      if (socket) {
+        socket.emit('startF2FastTest', {
+          connectionId: firstConnected.id,
+          targetUnitId: fastTestDeviceId
+        });
+      }
+    } catch (err) {
+      setTestingState(prev => ({ ...prev, isF2Testing: false }));
+      setError('F2测试启动失败: ' + err);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [clients, modbusConnections, testingState.isF1Testing, testingState.isF2Testing, fastTestDeviceId, socket]);
 
   // 静置测试（F1写值0x0004，沿用F1轮询机制）
   const handleStaticF1Test = useCallback(async () => {
@@ -1498,7 +1679,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
         body: JSON.stringify({
           deviceId: representativeDeviceId,
           selectedDevices: selectedDevices,
-          periodSeconds: ((loopIntervalInput ?? '').trim() === '' ? 1 : (loopIntervalTime || 1)),
+          periodSeconds: getEffectiveLoopPeriodSeconds(),
           writeValue: 0x0004
         })
       });
@@ -1514,7 +1695,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
         }));
 
         setSuccess('静置测试启动成功');
-        setLastCommandResult(`✅ 静置测试启动成功 - 每${(loopIntervalInput ?? '').trim() === '' ? 1 : (loopIntervalTime || 1)}秒广播写0x0001=0x0004并轮询读取`);
+        setLastCommandResult(`静置测试启动成功 - 每${getEffectiveLoopPeriodSeconds()}秒广播写0x0001=0x0004并轮询读取`);
       } else {
         setError(`静置测试启动失败: ${result.message || '未知错误'}`);
         setLastCommandResult(`❌ 静置测试启动失败: ${result.message || '未知错误'}`);
@@ -1525,7 +1706,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
     } finally {
       setIsLoading(false);
     }
-  }, [selectedDevices, testingState.isF1Testing, testingState.isF2Testing, testingState.testingDevices, loopIntervalTime, handleStopCyclicTest, resetRegisterStatus]);
+  }, [selectedDevices, testingState.isF1Testing, testingState.isF2Testing, testingState.testingDevices, handleStopCyclicTest, resetRegisterStatus, getEffectiveLoopPeriodSeconds]);
 
   return (
     <Box>
@@ -1613,15 +1794,15 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
                   onBlur={(e) => {
                     const raw = (e.target.value ?? '').trim();
                     if (raw === '') {
-                      // 空输入默认1秒
-                      setLoopIntervalTime(1);
-                      setLoopIntervalInput('1');
+                      // 空输入默认3秒
+                      setLoopIntervalTime(3);
+                      setLoopIntervalInput('3');
                       return;
                     }
-                    const value = parseInt(raw || '1', 10);
-                    // 精度为1秒并在范围内（1-60秒）
-                    // 检测设备接收到小于1秒检测频率，统一按1秒周期测试
-                    const clampedValue = Math.max(1, Math.min(60, isNaN(value) ? 1 : value));
+                    const value = parseInt(raw || '3', 10);
+                    // 精度为1秒并在范围内（3-60秒）
+                    // 检测设备接收到小于3秒检测频率，统一按3秒周期测试
+                    const clampedValue = Math.max(3, Math.min(60, isNaN(value) ? 3 : value));
                     setLoopIntervalTime(clampedValue);
                     setLoopIntervalInput(String(clampedValue));
                   }}
@@ -1633,8 +1814,8 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
                       WebkitTextFillColor: 'rgba(0, 0, 0, 0.6)'
                     }
                   }}
-                  inputProps={{ min: 1, max: 60, step: 1 }}
-                  helperText="1-60秒，精度1秒"
+                  inputProps={{ min: 3, max: 60, step: 1 }}
+                  helperText="3-60秒，精度1秒"
                 />
               </Box>
 
@@ -1659,7 +1840,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
                 <Box sx={{ p: 2, border: '1px solid #ddd', borderRadius: 1, backgroundColor: '#f8f9fa' }}>
                   <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
                     <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: 'primary.main' }}>
-                      状态寄存器 (0x0005)
+                      状态寄存器 (0x0000)
                     </Typography>
                     {/* 自动恢复不再需要手动按钮 */}
                   </Box>
@@ -1679,17 +1860,17 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
                       <Typography variant="caption" sx={{ color: parsedStatusDisplay.measRunning ? 'green' : 'gray' }}>
                         Bit1 MEAS_RUNNING: {parsedStatusDisplay.measRunning ? '✓' : '✗'}
                       </Typography>
-                      <Typography variant="caption" sx={{ color: parsedStatusDisplay.alarmDevOv ? 'red' : 'gray' }}>
-                        Bit2 ALARM_DEV_OV: {parsedStatusDisplay.alarmDevOv ? '✓' : '✗'}
-                      </Typography>
                       <Typography variant="caption" sx={{ color: parsedStatusDisplay.alarmCell1Ov ? 'red' : 'gray' }}>
-                        Bit3 ALARM_CELL1_OV: {parsedStatusDisplay.alarmCell1Ov ? '✓' : '✗'}
+                        Bit2 ALARM_CELL1_OV: {parsedStatusDisplay.alarmCell1Ov ? '✓' : '✗'}
                       </Typography>
                       <Typography variant="caption" sx={{ color: parsedStatusDisplay.alarmCell1Uv ? 'red' : 'gray' }}>
-                        Bit4 ALARM_CELL1_UV: {parsedStatusDisplay.alarmCell1Uv ? '✓' : '✗'}
+                        Bit3 ALARM_CELL1_UV: {parsedStatusDisplay.alarmCell1Uv ? '✓' : '✗'}
                       </Typography>
                       <Typography variant="caption" sx={{ color: parsedStatusDisplay.commTimeout ? 'red' : 'gray' }}>
-                        Bit5 COMM_TIMEOUT: {parsedStatusDisplay.commTimeout ? '✓' : '✗'}
+                        Bit4 COMM_TIMEOUT: {parsedStatusDisplay.commTimeout ? '✓' : '✗'}
+                      </Typography>
+                      <Typography variant="caption" sx={{ color: parsedStatusDisplay.testDone ? 'green' : 'gray' }}>
+                        Bit5 TEST_DONE: {parsedStatusDisplay.testDone ? '✓' : '✗'}
                       </Typography>
                       <Typography variant="caption" sx={{ color: parsedStatusDisplay.forceStopped ? 'red' : 'gray' }}>
                         Bit6 FORCE_STOPPED: {parsedStatusDisplay.forceStopped ? '✓' : '✗'}
@@ -1713,10 +1894,10 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
                     控制寄存器
                   </Typography>
                   <Typography variant="body2" sx={{ fontFamily: 'monospace', display: 'block', mb: 1, color: 'text.secondary' }}>
-                    A (0x0006): 0x{(selectedReg?.controlRegisterA ?? 0).toString(16).toUpperCase().padStart(4, '0')}
+                    A (0x0001): 0x{(selectedReg?.controlRegisterA ?? 0).toString(16).toUpperCase().padStart(4, '0')}
                   </Typography>
                   <Typography variant="body2" sx={{ fontFamily: 'monospace', display: 'block', mb: 1, color: 'text.secondary' }}>
-                    B (0x0007): {(selectedReg?.controlRegisterB ?? 0)} (Cycle)
+                    B (0x0002): {(selectedReg?.controlRegisterB ?? 0)} (Cycle)
                   </Typography>
                   <Typography variant="caption" sx={{ color: isSelectedDeviceOffline ? 'error.main' : 'text.secondary', display: 'block', mt: 1 }}>
                     {isSelectedDeviceOffline ? "注意: 该设备不在线 (已超过12秒无数据)" : ""}
@@ -1752,7 +1933,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
                   onClick={handleScanOnlineDevices}
                   disabled={isScanning || !isConnected || clients.length === 0 || testingState.isF1Testing || testingState.isF2Testing}
                 >
-                  {isScanning ? "扫描中..." : "扫描在线设备 (1-128)"}
+                  {isScanning ? "扫描中..." : "扫描在线设备 (1-24)"}
                 </Button>
 
                 {isScanning && (
@@ -1779,7 +1960,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
                   在线设备指示 (绿色: 在线 / 已选中, 灰色: 离线 / 未选中) - 点击可更改选中状态
                 </Typography>
                 <Grid container spacing={0.5}>
-                  {Array.from({ length: 128 }, (_, i) => i + 1).map((id) => {
+                  {Array.from({ length: 24 }, (_, i) => i + 1).map((id) => {
                     const isOnline = onlineDevices.includes(id);
                     const isSelected = selectedDevices.includes(id.toString());
 
@@ -1842,16 +2023,15 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
                   {testingState.isF1Testing && testingState.activeF1Mode === 'static' ? "停止静置测试" : "静置测试"}
                 </Button>
 
-                {/* 快速测试已下线
                 <Button
                   variant="contained"
                   color={testingState.isF2Testing ? "error" : "warning"}
                   onClick={() => handleF2Test()}
                   disabled={
                     !isConnected ||
-                    selectedDevices.length === 0 ||
                     testingState.isF1Testing ||
-                    (testingState.isF2Testing && testingState.f2CooldownTime > 0)
+                    testingState.isF2Testing ||
+                    testingState.f2CooldownTime > 0
                   }
                 >
                   {testingState.isF2Testing ? `停止快速测试 ${testingState.f2CooldownTime > 0 ? `(${testingState.f2CooldownTime}s)` : ''}` : "快速测试"}
@@ -1867,14 +2047,13 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
                     onChange={(e) => setFastTestDeviceId(Number(e.target.value))}
                     disabled={testingState.isF2Testing}
                   >
-                    {(onlineDevices.length > 0 ? onlineDevices : Array.from({ length: 128 }, (_, i) => i + 1)).map((n) => (
+                    {(onlineDevices.length > 0 ? onlineDevices : Array.from({ length: 24 }, (_, i) => i + 1)).map((n) => (
                       <MenuItem key={n} value={n}>
                         {n} {onlineDevices.length > 0 ? '(在线)' : ''}
                       </MenuItem>
                     ))}
                   </Select>
                 </FormControl>
-                */}
 
                 {/* <Button
               variant="outlined"
@@ -1897,14 +2076,53 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
                   elevation={1}
                   sx={{
                     p: 2,
-                    backgroundColor: lastCommandResult.includes('❌') ? '#ffebee' : '#e8f5e8',
-                    border: lastCommandResult.includes('❌') ? '1px solid #f44336' : '1px solid #4caf50'
+                    backgroundColor: /(失败|错误|异常)/.test(lastCommandResult) ? '#ffebee' : '#e8f5e8',
+                    border: /(失败|错误|异常)/.test(lastCommandResult) ? '1px solid #f44336' : '1px solid #4caf50'
                   }}
                 >
-                  <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
+                  <Typography variant="body2" sx={{ fontFamily: 'monospace', whiteSpace: 'pre-line' }}>
                     {lastCommandResult}
                   </Typography>
                 </Paper>
+                {testingState.isF2Testing && testingState.f2CooldownTime === 0 && f2TestingTimeLeft > 0 && (
+                  <Box sx={{ mt: 2 }}>
+                    <Typography variant="body2" sx={{ mb: 1 }}>
+                      正在进行快速测试（剩余{f2TestingTimeLeft}s）
+                    </Typography>
+                    <Typography variant="body2" sx={{ mb: 1 }}>
+                      TEST_DONE = {f2TestDoneValue ?? 0}
+                    </Typography>
+                    <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                      <Box sx={{ width: '100%', mr: 1 }}>
+                        <LinearProgress
+                          variant="determinate"
+                          value={((F2_TEST_SECONDS - f2TestingTimeLeft) / F2_TEST_SECONDS) * 100}
+                        />
+                      </Box>
+                      <Box sx={{ minWidth: 40 }}>
+                        <Typography variant="body2" color="text.secondary">{`${F2_TEST_SECONDS - f2TestingTimeLeft}/${F2_TEST_SECONDS}`}</Typography>
+                      </Box>
+                    </Box>
+                  </Box>
+                )}
+                {testingState.isF2Testing && testingState.f2CooldownTime > 0 && (
+                  <Box sx={{ mt: 2 }}>
+                    <Typography variant="body2" sx={{ mb: 1 }}>
+                      设备冷却保护中（{testingState.f2CooldownTime}s）
+                    </Typography>
+                    <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                      <Box sx={{ width: '100%', mr: 1 }}>
+                        <LinearProgress
+                          variant="determinate"
+                          value={((F2_COOLDOWN_SECONDS - testingState.f2CooldownTime) / F2_COOLDOWN_SECONDS) * 100}
+                        />
+                      </Box>
+                      <Box sx={{ minWidth: 40 }}>
+                        <Typography variant="body2" color="text.secondary">{`${F2_COOLDOWN_SECONDS - testingState.f2CooldownTime}/${F2_COOLDOWN_SECONDS}`}</Typography>
+                      </Box>
+                    </Box>
+                  </Box>
+                )}
               </Box>
             )}
           </Paper>

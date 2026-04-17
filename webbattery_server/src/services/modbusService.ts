@@ -50,10 +50,10 @@ const processCommandQueue = async (connectionId: string): Promise<void> => {
   if (processingCommands.get(connectionId)) {
     return; // 已经在处理队列
   }
-  
+
   processingCommands.set(connectionId, true);
   const queue = commandQueues.get(connectionId) || [];
-  
+
   while (queue.length > 0) {
     const command = queue.shift();
     if (command) {
@@ -64,7 +64,7 @@ const processCommandQueue = async (connectionId: string): Promise<void> => {
       }
     }
   }
-  
+
   processingCommands.set(connectionId, false);
 };
 
@@ -72,7 +72,7 @@ const processCommandQueue = async (connectionId: string): Promise<void> => {
 const enqueueCommand = <T>(connectionId: string, commandFn: () => Promise<T>): Promise<T> => {
   return new Promise((resolve, reject) => {
     const queue = commandQueues.get(connectionId) || [];
-    
+
     // 检查队列大小，如果超过限制则清理旧命令
     if (queue.length >= MAX_QUEUE_SIZE) {
       console.warn(`命令队列已满 ${connectionId}，清理旧命令`);
@@ -82,7 +82,7 @@ const enqueueCommand = <T>(connectionId: string, commandFn: () => Promise<T>): P
         queue.shift();
       }
     }
-    
+
     const wrappedCommand = async () => {
       try {
         const result = await commandFn();
@@ -91,10 +91,10 @@ const enqueueCommand = <T>(connectionId: string, commandFn: () => Promise<T>): P
         reject(error);
       }
     };
-    
+
     queue.push(wrappedCommand);
     commandQueues.set(connectionId, queue);
-    
+
     // 启动队列处理
     processCommandQueue(connectionId);
   });
@@ -108,13 +108,13 @@ const sendHeartbeat = async (connectionId: string): Promise<void> => {
       stopHeartbeat(connectionId);
       return;
     }
-    
+
     // 检查连接是否正在处理其他命令，如果是则跳过本次心跳
     if (connection.socket.readyState !== 'open') {
       console.log(`跳过心跳，连接状态异常: ${connectionId}`);
       return;
     }
-    
+
     // 使用简单的TCP连接检查作为心跳，避免与业务命令冲突
     // 只更新最后活动时间，不发送实际的Modbus命令
     connection.lastActivity = new Date();
@@ -135,12 +135,12 @@ const sendHeartbeat = async (connectionId: string): Promise<void> => {
 const startHeartbeat = (connectionId: string): void => {
   // 先清除可能存在的旧定时器
   stopHeartbeat(connectionId);
-  
+
   // 设置新的心跳定时器
   const timer = setInterval(() => {
     sendHeartbeat(connectionId);
   }, HEARTBEAT_INTERVAL);
-  
+
   heartbeatTimers.set(connectionId, timer);
   console.log(`心跳已启动: ${connectionId}`);
 };
@@ -181,7 +181,7 @@ const getLocalMacAddress = async (): Promise<string> => {
 // 创建Modbus TCP客户端连接
 export const createModbusClient = async (host: string, port: number, deviceId: number): Promise<string> => {
   const connectionId = generateConnectionId(host, port, deviceId);
-  
+
   // 如果连接已存在，先关闭
   if (connections.has(connectionId)) {
     await closeModbusClient(connectionId);
@@ -189,7 +189,7 @@ export const createModbusClient = async (host: string, port: number, deviceId: n
 
   return new Promise((resolve, reject) => {
     const socket = new net.Socket();
-    
+
     const connection: ModbusConnection = {
       id: connectionId,
       deviceSeq: deviceSequenceCounter++, // 分配递增的设备序号
@@ -208,7 +208,7 @@ export const createModbusClient = async (host: string, port: number, deviceId: n
       console.log(`Modbus TCP连接已建立: ${connectionId}`);
       connection.isConnected = true;
       connection.lastActivity = new Date();
-      
+
       // 获取MAC地址
       try {
         if (host === '127.0.0.1' || host === 'localhost') {
@@ -222,33 +222,33 @@ export const createModbusClient = async (host: string, port: number, deviceId: n
         console.warn(`获取MAC地址失败 ${host}:`, error);
         connection.mac = '00:00:00:00:00:00';
       }
-      
+
       connections.set(connectionId, connection);
-      
+
       // 启动心跳机制
       startHeartbeat(connectionId);
-      
+
       // 立即发送一次初始查询以确认连接
       setTimeout(() => {
         sendHeartbeat(connectionId);
       }, 1000); // 1秒后发送初始查询
-      
+
       modbusEvents.emit('connectionCreated', connection);
       modbusEvents.emit('clientConnected', { connectionId, host, port, deviceId });
-      
+
       // 启动寄存器状态监控
       try {
         // 检查连接设备数量
         const allConnections = Array.from(connections.values());
         const activeConnections = allConnections.filter(conn => conn.isConnected);
         const deviceCount = activeConnections.length;
-        
+
         // 删除寄存器监控启动代码，不再需要处理状态寄存器与控制寄存器
         console.log(`✅ 设备连接成功: ${connectionId} (设备数量: ${deviceCount})`);
       } catch (error) {
         console.warn(`⚠️ 设备连接处理失败: ${connectionId}`, error);
       }
-      
+
       resolve(connectionId);
     });
 
@@ -268,12 +268,12 @@ export const createModbusClient = async (host: string, port: number, deviceId: n
     socket.on('close', () => {
       console.log(`Modbus连接已关闭: ${connectionId}`);
       connection.isConnected = false;
-      
+
       // 停止心跳机制
       stopHeartbeat(connectionId);
-      
+
       // 删除寄存器监控停止代码，不再需要处理状态寄存器与控制寄存器
-      
+
       connections.delete(connectionId);
       modbusEvents.emit('connectionClosed', connectionId);
       modbusEvents.emit('clientDisconnected', { connectionId });
@@ -293,13 +293,13 @@ export const closeModbusClient = async (connectionId: string): Promise<void> => 
   if (connection) {
     // 停止心跳机制
     stopHeartbeat(connectionId);
-    
+
     // 删除寄存器监控停止代码，不再需要处理状态寄存器与控制寄存器
-    
+
     // 清理命令队列
     commandQueues.delete(connectionId);
     processingCommands.delete(connectionId);
-    
+
     connection.socket.destroy();
     connections.delete(connectionId);
     console.log(`Modbus连接已关闭: ${connectionId}`);
@@ -314,13 +314,13 @@ export const closeAllModbusClients = async (): Promise<void> => {
     connection.socket.destroy();
   }
   connections.clear();
-  
+
   // 删除所有寄存器监控停止代码，不再需要处理状态寄存器与控制寄存器
-  
+
   // 清理所有命令队列
   commandQueues.clear();
   processingCommands.clear();
-  
+
   console.log('所有Modbus连接已关闭');
 };
 
@@ -341,7 +341,7 @@ export const getConnectionStatus = (connectionId?: string) => {
       mac: connection.mac
     } : null;
   }
-  
+
   return Array.from(connections.values()).map(conn => ({
     id: conn.id, // 使用真正的连接ID
     connectionId: conn.id,
@@ -444,7 +444,7 @@ export const sendReadCommand = async (connectionId: string, command: Buffer): Pr
 // 广播命令到所有连接
 export const broadcastCommand = async (command: Buffer): Promise<{ [connectionId: string]: boolean | Error }> => {
   const results: { [connectionId: string]: boolean | Error } = {};
-  
+
   const promises = Array.from(connections.entries()).map(async ([connectionId, connection]) => {
     if (connection.isConnected) {
       try {
@@ -476,13 +476,13 @@ export const readInputRegisters = async (connectionId: string, address: number, 
 
   const frame = Buffer.alloc(12);
   let offset = 0;
-  
+
   // MBAP Header
   frame.writeUInt16BE(transactionId, offset); offset += 2;
   frame.writeUInt16BE(protocolId, offset); offset += 2;
   frame.writeUInt16BE(length, offset); offset += 2;
   frame.writeUInt8(unitId, offset); offset += 1;
-  
+
   // PDU
   frame.writeUInt8(functionCode, offset); offset += 1;
   frame.writeUInt16BE(address, offset); offset += 2;
@@ -508,13 +508,13 @@ export const readInputRegistersOneWay = async (connectionId: string, address: nu
 
   const frame = Buffer.alloc(12);
   let offset = 0;
-  
+
   // MBAP Header
   frame.writeUInt16BE(transactionId, offset); offset += 2;
   frame.writeUInt16BE(protocolId, offset); offset += 2;
   frame.writeUInt16BE(length, offset); offset += 2;
   frame.writeUInt8(unitId, offset); offset += 1;
-  
+
   // PDU
   frame.writeUInt8(functionCode, offset); offset += 1;
   frame.writeUInt16BE(address, offset); offset += 2;
@@ -543,19 +543,19 @@ export const readHoldingRegisters = async (connectionId: string, address: number
 
   const frame = Buffer.alloc(12);
   let offset = 0;
-  
+
   // MBAP Header
   frame.writeUInt16BE(transactionId, offset); offset += 2;
   frame.writeUInt16BE(protocolId, offset); offset += 2;
   frame.writeUInt16BE(length, offset); offset += 2;
   frame.writeUInt8(unitId, offset); offset += 1;
-  
+
   // PDU
   frame.writeUInt8(functionCode, offset); offset += 1;
   frame.writeUInt16BE(address, offset); offset += 2;
   frame.writeUInt16BE(quantity, offset); offset += 2;
 
-  console.log(`📤 读保持寄存器 ${connectionId}: 地址=0x${address.toString(16).padStart(4, '0')}, 数量=${quantity}`);
+  console.log(`读保持寄存器 ${connectionId}: 地址=0x${address.toString(16).padStart(4, '0')}, 数量=${quantity}`);
   return sendCommand(connectionId, frame);
 };
 
@@ -575,19 +575,19 @@ export const readHoldingRegistersOneWay = async (connectionId: string, address: 
 
   const frame = Buffer.alloc(12);
   let offset = 0;
-  
+
   // MBAP Header
   frame.writeUInt16BE(transactionId, offset); offset += 2;
   frame.writeUInt16BE(protocolId, offset); offset += 2;
   frame.writeUInt16BE(length, offset); offset += 2;
   frame.writeUInt8(unitId, offset); offset += 1;
-  
+
   // PDU
   frame.writeUInt8(functionCode, offset); offset += 1;
   frame.writeUInt16BE(address, offset); offset += 2;
   frame.writeUInt16BE(quantity, offset); offset += 2;
 
-  console.log(`📤 读保持寄存器 ${connectionId}: 地址=0x${address.toString(16).padStart(4, '0')}, 数量=${quantity}`);
+  console.log(`读保持寄存器 ${connectionId}: 地址=0x${address.toString(16).padStart(4, '0')}, 数量=${quantity}`);
   return sendReadCommand(connectionId, frame);
 };
 
@@ -654,7 +654,7 @@ export const readHoldingRegistersPolling = async (connectionId: string, register
   if (!connection || !connection.isConnected) {
     throw new Error(`连接不存在或未连接: ${connectionId}`);
   }
-  
+
   // 轮询地址01到0C
   for (let unitId = 0x01; unitId <= 0x0C; unitId++) {
     try {
@@ -666,24 +666,24 @@ export const readHoldingRegistersPolling = async (connectionId: string, register
 
       const frame = Buffer.alloc(12);
       let offset = 0;
-      
+
       // MBAP Header
       frame.writeUInt16BE(transactionId, offset); offset += 2;
       frame.writeUInt16BE(protocolId, offset); offset += 2;
       frame.writeUInt16BE(length, offset); offset += 2;
       frame.writeUInt8(unitId, offset); offset += 1;
-      
+
       // PDU
       frame.writeUInt8(functionCode, offset); offset += 1;
       frame.writeUInt16BE(registerAddress, offset); offset += 2;
       frame.writeUInt16BE(quantity, offset); offset += 2;
 
       console.log(`📤 轮询读取 ${connectionId}: UnitID=0x${unitId.toString(16).padStart(2, '0')}, TxID=0x${transactionId.toString(16)}`);
-      
+
       // 使用200ms超时等待响应
       // 接收到响应或超时后，立即继续下一个
       await sendCommandAndWaitResponse(connectionId, frame, transactionId, 200);
-      
+
     } catch (error) {
       console.warn(`轮询读取保持寄存器设备地址 0x${unitId.toString(16).padStart(2, '0')} 失败:`, error);
       // 继续轮询下一个地址
@@ -711,20 +711,20 @@ export const readHoldingRegistersWithFixedTxId = async (connectionId: string, tr
 
   const frame = Buffer.alloc(12);
   let offset = 0;
-  
+
   // MBAP Header
   frame.writeUInt16BE(transactionId, offset); offset += 2;
   frame.writeUInt16BE(protocolId, offset); offset += 2;
   frame.writeUInt16BE(length, offset); offset += 2;
   frame.writeUInt8(unitId, offset); offset += 1;
-  
+
   // PDU
   frame.writeUInt8(functionCode, offset); offset += 1;
   frame.writeUInt16BE(address, offset); offset += 2;
   frame.writeUInt16BE(quantity, offset); offset += 2;
 
-  console.log(`📤 读保持寄存器(固定TxID) ${connectionId}: TxID=0x${transactionId.toString(16).padStart(4, '0')}, UnitID=${unitId}, 地址=0x${address.toString(16).padStart(4, '0')}, 数量=${quantity}`);
-  
+  console.log(`读保持寄存器(固定TxID) ${connectionId}: TxID=0x${transactionId.toString(16).padStart(4, '0')}, UnitID=${unitId}, 地址=0x${address.toString(16).padStart(4, '0')}, 数量=${quantity}`);
+
   // 发送命令并等待响应
   return enqueueCommand(connectionId, () => {
     return new Promise<Buffer | null>((resolve) => {
@@ -814,13 +814,13 @@ export const writeSingleRegister = async (connectionId: string, address: number,
 
   const frame = Buffer.alloc(12);
   let offset = 0;
-  
+
   // MBAP Header
   frame.writeUInt16BE(transactionId, offset); offset += 2;
   frame.writeUInt16BE(protocolId, offset); offset += 2;
   frame.writeUInt16BE(length, offset); offset += 2;
   frame.writeUInt8(unitId, offset); offset += 1;
-  
+
   // PDU
   frame.writeUInt8(functionCode, offset); offset += 1;
   frame.writeUInt16BE(address, offset); offset += 2;
@@ -832,9 +832,9 @@ export const writeSingleRegister = async (connectionId: string, address: number,
 
 // 使用固定Transaction ID写入单个寄存器（单向发送，不等待响应）
 export const writeSingleRegisterWithFixedTxId = async (
-  connectionId: string, 
-  transactionId: number, 
-  address: number, 
+  connectionId: string,
+  transactionId: number,
+  address: number,
   value: number,
   targetUnitId: number = 0xFF // 默认为广播地址
 ): Promise<void> => {
@@ -854,18 +854,18 @@ export const writeSingleRegisterWithFixedTxId = async (
   // 构建Modbus TCP写入单个寄存器命令，使用固定Transaction ID
   const protocolId = 0x0000;
   const length = 6; // Unit ID + Function Code + Address + Value
-  const unitId = targetUnitId; 
+  const unitId = targetUnitId;
   const functionCode = 0x06; // 写入单个寄存器
 
   const frame = Buffer.alloc(12);
   let offset = 0;
-  
+
   // MBAP Header
   frame.writeUInt16BE(transactionId, offset); offset += 2;
   frame.writeUInt16BE(protocolId, offset); offset += 2;
   frame.writeUInt16BE(length, offset); offset += 2;
   frame.writeUInt8(unitId, offset); offset += 1;
-  
+
   // PDU
   frame.writeUInt8(functionCode, offset); offset += 1;
   frame.writeUInt16BE(address, offset); offset += 2;
@@ -874,7 +874,7 @@ export const writeSingleRegisterWithFixedTxId = async (
   console.log(`📡 发送Modbus帧 ${connectionId}: ${frame.toString('hex').toUpperCase()}`);
 
   await sendWriteCommand(connectionId, frame);
-  
+
   console.log(`✅ Modbus写命令已发送 ${connectionId}，无需等待响应`);
 };
 
@@ -896,19 +896,19 @@ export const writeMultipleRegisters = async (connectionId: string, address: numb
 
   const frame = Buffer.alloc(13 + byteCount);
   let offset = 0;
-  
+
   // MBAP Header
   frame.writeUInt16BE(transactionId, offset); offset += 2;
   frame.writeUInt16BE(protocolId, offset); offset += 2;
   frame.writeUInt16BE(length, offset); offset += 2;
   frame.writeUInt8(unitId, offset); offset += 1;
-  
+
   // PDU
   frame.writeUInt8(functionCode, offset); offset += 1;
   frame.writeUInt16BE(address, offset); offset += 2;
   frame.writeUInt16BE(quantity, offset); offset += 2;
   frame.writeUInt8(byteCount, offset); offset += 1;
-  
+
   // 写入寄存器值
   for (const value of values) {
     frame.writeUInt16BE(value, offset);
@@ -923,29 +923,29 @@ export const writeMultipleRegisters = async (connectionId: string, address: numb
 
 // 发送Modbus命令（兼容性函数）
 export const sendModbusCommand = async (connectionId: string, command: number, parameters: number[] = []): Promise<void> => {
-  
+
   // 根据命令类型构建相应的Modbus帧
   switch (command) {
     case 0x03: // 读取保持寄存器
       const address = parameters[0] || 0;
       const quantity = parameters[1] || 1;
       return readHoldingRegisters(connectionId, address, quantity);
-    
+
     case 0x04: // 读取输入寄存器
       const inputAddress = parameters[0] || 0;
       const inputQuantity = parameters[1] || 1;
       return readInputRegisters(connectionId, inputAddress, inputQuantity);
-    
+
     case 0x06: // 写入单个寄存器
       const regAddress = parameters[0] || 0;
       const regValue = parameters[1] || 0;
       return writeSingleRegister(connectionId, regAddress, regValue);
-    
+
     case 0x10: // 写入多个寄存器
       const startAddr = parameters[0] || 0;
       const values = parameters.slice(1) || [0];
       return writeMultipleRegisters(connectionId, startAddr, values);
-    
+
     default:
       // 对于其他命令，构建通用的Modbus TCP帧
       const transactionId = Math.floor(Math.random() * 65536);
@@ -955,20 +955,20 @@ export const sendModbusCommand = async (connectionId: string, command: number, p
         throw new Error(`连接不存在或未连接: ${connectionId}`);
       }
       const unitId = connection.deviceId;
-      
+
       // 根据命令值大小决定使用的字节数
       const commandBytes = command <= 255 ? 1 : 2;
       const length = 1 + commandBytes + parameters.length * 2; // Unit ID + Function Code + Parameters
-      
+
       const frame = Buffer.alloc(6 + length);
       let offset = 0;
-      
+
       // MBAP Header
       frame.writeUInt16BE(transactionId, offset); offset += 2;
       frame.writeUInt16BE(protocolId, offset); offset += 2;
       frame.writeUInt16BE(length, offset); offset += 2;
       frame.writeUInt8(unitId, offset); offset += 1;
-      
+
       // PDU - 根据命令值大小选择合适的写入方式
       if (command <= 255) {
         frame.writeUInt8(command, offset); offset += 1;
@@ -976,13 +976,13 @@ export const sendModbusCommand = async (connectionId: string, command: number, p
         // 对于大于255的命令值，使用16位格式
         frame.writeUInt16BE(command, offset); offset += 2;
       }
-      
+
       // Parameters
       for (const param of parameters) {
         frame.writeUInt16BE(param, offset);
         offset += 2;
       }
-      
+
       return sendCommand(connectionId, frame);
   }
 };
@@ -990,7 +990,7 @@ export const sendModbusCommand = async (connectionId: string, command: number, p
 // 广播Modbus命令（兼容性函数）
 export const broadcastModbusCommand = async (command: number, parameters: number[] = []): Promise<{ [connectionId: string]: boolean | Error }> => {
   const results: { [connectionId: string]: boolean | Error } = {};
-  
+
   const promises = Array.from(connections.keys()).map(async (connectionId) => {
     try {
       await sendModbusCommand(connectionId, command, parameters);

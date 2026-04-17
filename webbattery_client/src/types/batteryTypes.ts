@@ -52,14 +52,14 @@ export interface BatteryData {
   statusBits?: {
     measEnable: boolean;      // bit0: 表示测试已启动，无论是否正在采样
     measRunning: boolean;     // bit1: 当前测试正在执行中（如采样/计算进行中）
-    alarmDevOv: boolean;      // bit2: 检测设备供电异常标志
-    alarmCell1Ov: boolean;    // bit3: 电池电压超出4.5V上限标志
-    alarmCell1Uv: boolean;    // bit4: 电池电压低于0.2V下限标志
-    commTimeout: boolean;     // bit5: F1模式中充放电机未按时读取超时事件
+    alarmCell1Ov: boolean;    // bit2: 电池电压超出4.5V上限标志
+    alarmCell1Uv: boolean;    // bit3: 电池电压低于0.2V下限标志
+    commTimeout: boolean;     // bit4: F1模式中充放电机未按时读取超时事件
+    testDone: boolean;        // bit5: F2测试完成标志
     forceStopped: boolean;    // bit6: 被充放电机强行中止标志
     dataReady: boolean;       // bit7: F1采样数据更新标志，可作为充放电机数据同步时钟戳
     commError: boolean;       // bit8: 检测设备收到的写入命令错误时置1，收到的写入命令正确时清0
-    address: number;          // bit9-15: 地址寄存器 (1-24)
+    address: number;          // bit9-15: 地址寄存器
     rawValue: number;
     binaryString: string;
   };

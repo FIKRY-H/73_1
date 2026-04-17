@@ -1,11 +1,12 @@
 import { getDatabase } from '../config/database';
 import { BatteryData, DeviceMapping, FrameType, ProcessedData } from '../models/batteryModel';
+import { STATUS_BITS } from '../utils/modbusFrameUtils';
 import ExcelJS from 'exceljs';
 
 // Save battery data to database
 export async function saveBatteryData(data: BatteryData): Promise<number> {
   const db = getDatabase();
-  
+
   try {
     // 确保MAC地址不为空
     let mac = data.mac;
@@ -13,32 +14,31 @@ export async function saveBatteryData(data: BatteryData): Promise<number> {
       console.warn(`MAC地址为空或无效: '${mac}', 跳过保存该条数据`);
       return 0;
     }
-    
+
     // 修改映射关系：r1→R_ohm，r2→R_sei，r3→R_ct
     const r1Value = data.r_ohm?.actual || data.r1?.actual || data.rOhm || null;
     const r2Value = data.r_sei?.actual || data.r2?.actual || data.rSei || null;
     const r3Value = data.r_ct?.actual || data.r3?.actual || data.rCt || null;
-    
+
     // 获取电池3和电池4的阻抗值
     const bat3R1 = data.bat3_r1?.actual || null;
     const bat3R2 = data.bat3_r2?.actual || null;
     const bat3R3 = data.bat3_r3?.actual || null;
-    
+
     const bat4R1 = data.bat4_r1?.actual || null;
     const bat4R2 = data.bat4_r2?.actual || null;
     const bat4R3 = data.bat4_r3?.actual || null;
-    
+
     // 使用当前系统真实时间作为时间戳
     const timestamp = data.timestamp || new Date().toISOString();
-    
+
     // 确定dataready状态
     let dataReady = 1; // 默认为1
     if (data.status !== undefined) {
       if (typeof data.status === 'object' && data.status && (data.status as any).dataReady !== undefined) {
         dataReady = (data.status as any).dataReady ? 1 : 0;
       } else if (typeof data.status === 'number') {
-        // 与socketService保持一致：DATA_READY位为bit8（0x0100）
-        dataReady = (data.status & 0x0100) !== 0 ? 1 : 0;
+        dataReady = (data.status & STATUS_BITS.DATA_READY) !== 0 ? 1 : 0;
       }
     }
 
@@ -73,7 +73,7 @@ export async function saveBatteryData(data: BatteryData): Promise<number> {
       dataReady,
       timestamp
     );
-    
+
     return result.lastID || 0;
   } catch (error) {
     console.error('Error saving battery data:', error);
@@ -84,7 +84,7 @@ export async function saveBatteryData(data: BatteryData): Promise<number> {
 // Get battery data by device number
 export async function getBatteryDataByDeviceNumber(deviceNumber: number): Promise<BatteryData[]> {
   const db = getDatabase();
-  
+
   try {
     const rows = await db.all(
       `SELECT * FROM battery_data 
@@ -93,8 +93,8 @@ export async function getBatteryDataByDeviceNumber(deviceNumber: number): Promis
        LIMIT 100`,
       deviceNumber
     );
-    
-  return rows.map(row => ({
+
+    return rows.map(row => ({
       deviceNumber: row.device_number,
       mac: row.mac,
       // 新格式：r_ct、r_ohm、r_sei对象
@@ -105,17 +105,17 @@ export async function getBatteryDataByDeviceNumber(deviceNumber: number): Promis
       r1: row.r_ohm ? { value: 0, power: 0, actual: row.r_ohm } : undefined,
       r2: row.r_sei ? { value: 0, power: 0, actual: row.r_sei } : undefined,
       r3: row.r_ct ? { value: 0, power: 0, actual: row.r_ct } : undefined,
-      
+
       // 电池3阻抗
       bat3_r1: row.bat3_r1 ? { value: 0, power: 0, actual: row.bat3_r1 } : undefined,
       bat3_r2: row.bat3_r2 ? { value: 0, power: 0, actual: row.bat3_r2 } : undefined,
       bat3_r3: row.bat3_r3 ? { value: 0, power: 0, actual: row.bat3_r3 } : undefined,
-      
+
       // 电池4阻抗
       bat4_r1: row.bat4_r1 ? { value: 0, power: 0, actual: row.bat4_r1 } : undefined,
       bat4_r2: row.bat4_r2 ? { value: 0, power: 0, actual: row.bat4_r2 } : undefined,
       bat4_r3: row.bat4_r3 ? { value: 0, power: 0, actual: row.bat4_r3 } : undefined,
-      
+
       rOhm: row.r_ohm,
       rSei: row.r_sei,
       rCt: row.r_ct,
@@ -132,7 +132,7 @@ export async function getBatteryDataByDeviceNumber(deviceNumber: number): Promis
 // Get latest battery data for all devices
 export async function getLatestBatteryData(): Promise<BatteryData[]> {
   const db = getDatabase();
-  
+
   try {
     const rows = await db.all(`
       SELECT b.*
@@ -148,7 +148,7 @@ export async function getLatestBatteryData(): Promise<BatteryData[]> {
           )
           AND b.timestamp = m.max_timestamp
     `);
-    
+
     return rows.map(row => ({
       mac: row.mac,
       ip_prefix: row.ip_prefix,
@@ -162,17 +162,17 @@ export async function getLatestBatteryData(): Promise<BatteryData[]> {
       r1: row.r_ohm ? { value: 0, power: 0, actual: row.r_ohm } : undefined,
       r2: row.r_sei ? { value: 0, power: 0, actual: row.r_sei } : undefined,
       r3: row.r_ct ? { value: 0, power: 0, actual: row.r_ct } : undefined,
-      
+
       // 电池3阻抗
       bat3_r1: row.bat3_r1 ? { value: 0, power: 0, actual: row.bat3_r1 } : undefined,
       bat3_r2: row.bat3_r2 ? { value: 0, power: 0, actual: row.bat3_r2 } : undefined,
       bat3_r3: row.bat3_r3 ? { value: 0, power: 0, actual: row.bat3_r3 } : undefined,
-      
+
       // 电池4阻抗
       bat4_r1: row.bat4_r1 ? { value: 0, power: 0, actual: row.bat4_r1 } : undefined,
       bat4_r2: row.bat4_r2 ? { value: 0, power: 0, actual: row.bat4_r2 } : undefined,
       bat4_r3: row.bat4_r3 ? { value: 0, power: 0, actual: row.bat4_r3 } : undefined,
-      
+
       rOhm: row.r_ohm,
       rSei: row.r_sei,
       rCt: row.r_ct,
@@ -189,14 +189,14 @@ export async function getLatestBatteryData(): Promise<BatteryData[]> {
 // Save or update device mapping
 export async function saveDeviceMapping(uid: string, deviceNumber: string): Promise<boolean> {
   const db = getDatabase();
-  
+
   try {
     await db.run(
       `INSERT OR REPLACE INTO device_mapping (uid, device_number) VALUES (?, ?)`,
-      uid, 
+      uid,
       deviceNumber
     );
-    
+
     return true;
   } catch (error) {
     console.error('Error saving device mapping:', error);
@@ -207,22 +207,22 @@ export async function saveDeviceMapping(uid: string, deviceNumber: string): Prom
 // Get device number by MAC, auto-assign if not exists
 export async function getDeviceNumberByMac(mac: string): Promise<number> {
   const db = getDatabase();
-  
+
   try {
     // 确保MAC地址不为空
     if (!mac || mac.trim() === '') {
       console.warn('MAC地址为空，使用默认设备编号1');
       return 1;
     }
-    
+
     // 检查表结构，确定使用哪个字段
     const tableInfo = await db.all("PRAGMA table_info(device_mapping)");
     const hasMacField = tableInfo.some(col => col.name === 'mac');
     const hasUidField = tableInfo.some(col => col.name === 'uid');
-    
+
     let query: string;
     let params: string[];
-    
+
     if (hasMacField && hasUidField) {
       // 两个字段都存在，优先查找mac字段，回退到uid字段
       query = `SELECT device_number FROM device_mapping WHERE mac = ? OR uid = ?`;
@@ -239,9 +239,9 @@ export async function getDeviceNumberByMac(mac: string): Promise<number> {
       // 没有相关字段，直接分配新编号
       return await autoAssignDeviceNumber(mac);
     }
-    
+
     const row = await db.get(query, ...params);
-    
+
     if (row && row.device_number) {
       const deviceNumber = parseInt(row.device_number, 10);
       // 确保设备编号有效（大于0）
@@ -249,7 +249,7 @@ export async function getDeviceNumberByMac(mac: string): Promise<number> {
         return deviceNumber;
       }
     }
-    
+
     // 如果不存在或设备编号无效，自动分配新的设备编号
     return await autoAssignDeviceNumber(mac);
   } catch (error) {
@@ -263,25 +263,25 @@ export async function getDeviceNumberByMac(mac: string): Promise<number> {
 // Auto-assign device number for new MAC address
 export async function autoAssignDeviceNumber(mac: string): Promise<number> {
   const db = getDatabase();
-  
+
   try {
     // 获取当前最大的设备编号
     const maxRow = await db.get(
       `SELECT MAX(CAST(device_number AS INTEGER)) as max_number FROM device_mapping`
     );
-    
+
     const nextDeviceNumber = (maxRow?.max_number || 0) + 1;
-    
+
     // 检查表结构
     const tableInfo = await db.all("PRAGMA table_info(device_mapping)");
     const hasMacField = tableInfo.some(col => col.name === 'mac');
     const hasUidField = tableInfo.some(col => col.name === 'uid');
     const hasCreatedAtField = tableInfo.some(col => col.name === 'created_at');
-    
+
     // 构建插入语句
     let insertQuery: string;
     let insertParams: any[];
-    
+
     if (hasMacField && hasUidField && hasCreatedAtField) {
       // 完整字段
       insertQuery = `INSERT INTO device_mapping (mac, uid, device_number, created_at) VALUES (?, ?, ?, ?)`;
@@ -305,10 +305,10 @@ export async function autoAssignDeviceNumber(mac: string): Promise<number> {
     } else {
       throw new Error('device_mapping table structure is not supported');
     }
-    
+
     // 创建新的设备映射
     await db.run(insertQuery, ...insertParams);
-    
+
     // 同时插入到device_mappings表以保持兼容性
     try {
       await db.run(
@@ -321,9 +321,9 @@ export async function autoAssignDeviceNumber(mac: string): Promise<number> {
       // 如果device_mappings表不存在或插入失败，忽略错误
       console.warn('Failed to insert into device_mappings table:', mappingsError);
     }
-    
+
     console.log(`为MAC地址 ${mac} 自动分配设备编号: ${nextDeviceNumber}`);
-    
+
     return nextDeviceNumber;
   } catch (error) {
     console.error('Error auto-assigning device number:', error);
@@ -334,10 +334,10 @@ export async function autoAssignDeviceNumber(mac: string): Promise<number> {
 // Get all device mappings
 export async function getAllDeviceMappings(): Promise<DeviceMapping[]> {
   const db = getDatabase();
-  
+
   try {
     const rows = await db.all(`SELECT * FROM device_mapping`);
-    
+
     return rows.map(row => ({
       mac: row.mac || row.uid, // 使用mac字段，如果没有则回退到uid
       deviceNumber: row.device_number,
@@ -351,16 +351,16 @@ export async function getAllDeviceMappings(): Promise<DeviceMapping[]> {
 
 // Process test data (统一的测试数据处理函数)
 export async function processTestData(
-  mac: string, 
+  mac: string,
   hexValues: string[],
   testType: 'F1' | 'F2'
 ): Promise<ProcessedData> {
   try {
     // 检查最小数据长度
     if (hexValues.length < 6) {
-      return { 
-        success: false, 
-        error: `Insufficient data: got ${hexValues.length}, need at least 6` 
+      return {
+        success: false,
+        error: `Insufficient data: got ${hexValues.length}, need at least 6`
       };
     }
 
@@ -368,19 +368,19 @@ export async function processTestData(
     const voltageHigh = parseInt(hexValues[0], 16);
     const voltageLow = parseInt(hexValues[1], 16);
     const voltage = (voltageHigh << 8) | voltageLow;
-    
+
     console.log(`📊 电压解析: ${hexValues[0]} ${hexValues[1]} -> ${voltage}mV`);
-    
+
     // 解析R1阻抗 (2 bytes)
     const r1High = parseInt(hexValues[2], 16);
     const r1Low = parseInt(hexValues[3], 16);
     const r1 = (r1High << 8) | r1Low;
-    
+
     // 解析R2阻抗 (2 bytes)
     const r2High = parseInt(hexValues[4], 16);
     const r2Low = parseInt(hexValues[5], 16);
     const r2 = (r2High << 8) | r2Low;
-    
+
     // 解析R3阻抗 (如果有足够数据)
     let r3 = 0;
     if (hexValues.length >= 8) {
@@ -388,11 +388,11 @@ export async function processTestData(
       const r3Low = parseInt(hexValues[7], 16);
       r3 = (r3High << 8) | r3Low;
     }
-    
+
     console.log(`⚡ 阻抗解析: R1=${r1}μΩ, R2=${r2}μΩ, R3=${r3}μΩ`);
-    
+
     console.log(`Processed ${testType} test data from ${mac}:`, {
-      voltage: `${voltage}mV`, 
+      voltage: `${voltage}mV`,
       r1: `${r1}μΩ`,
       r2: `${r2}μΩ`,
       r3: `${r3}μΩ`
@@ -426,7 +426,7 @@ export async function processTestData(
 
 // 保持向后兼容的函数
 export async function processHighAndLowFrequencyData(
-  mac: string, 
+  mac: string,
   hexValues: string[]
 ): Promise<ProcessedData> {
   return processTestData(mac, hexValues, 'F1');
@@ -434,7 +434,7 @@ export async function processHighAndLowFrequencyData(
 
 // 保持向后兼容的函数
 export async function processHighFrequencyData(
-  mac: string, 
+  mac: string,
   hexValues: string[]
 ): Promise<ProcessedData> {
   return processTestData(mac, hexValues, 'F2');
@@ -442,7 +442,7 @@ export async function processHighFrequencyData(
 
 // 保持向后兼容的函数
 export async function processLowFrequencyData(
-  mac: string, 
+  mac: string,
   hexValues: string[]
 ): Promise<ProcessedData> {
   return processTestData(mac, hexValues, 'F1');
@@ -450,15 +450,15 @@ export async function processLowFrequencyData(
 
 // Process device detection response (05 frame)
 export async function processDeviceDetectionResponse(
-  uid: string, 
+  uid: string,
   hexValues: string[]
 ): Promise<ProcessedData> {
   try {
     // 检查数据长度：帧头(1) + UID(12) + 帧尾(1) = 14
     if (hexValues.length < 14) {
-      return { 
-        success: false, 
-        error: `Insufficient data for device detection frame: got ${hexValues.length}, need 14` 
+      return {
+        success: false,
+        error: `Insufficient data for device detection frame: got ${hexValues.length}, need 14`
       };
     }
 
@@ -483,7 +483,7 @@ export async function processDeviceDetectionResponse(
     // 帧头(05) + 12字节UID + 帧尾(7E)
     const uidBytes = hexValues.slice(1, 13);
     const extractedUid = uidBytes.join('').toUpperCase();
-    
+
     console.log(`处理设备检测响应帧，从 ${uid} 收到:`, {
       原始数据: hexValues.join(' '),
       提取的UID: extractedUid
@@ -523,7 +523,7 @@ export const getBatteryData = async (testType?: FrameType) => {
     }
     query += ' ORDER BY timestamp DESC LIMIT 100';
     const rows = await db.all(query);
-    
+
     // 映射数据库字段到前端格式，支持新的r_ct、r_ohm、r_sei格式
     return rows.map(row => ({
       deviceNumber: row.device_number,
@@ -555,11 +555,11 @@ export const getDeviceMappings = async () => {
     const db = await getDatabase();
     // 尝试从device_mappings表获取数据
     let mappings = await db.all('SELECT * FROM device_mappings ORDER BY create_time DESC');
-    
+
     // 如果device_mappings表为空，尝试从device_mapping表获取
     if (mappings.length === 0) {
       mappings = await db.all('SELECT * FROM device_mapping ORDER BY created_at DESC');
-      
+
       // 将数据从device_mapping复制到device_mappings
       if (mappings.length > 0) {
         console.log('从device_mapping表复制数据到device_mappings表');
@@ -572,7 +572,7 @@ export const getDeviceMappings = async () => {
         }
       }
     }
-    
+
     return mappings.map(mapping => ({
       mac: mapping.mac || mapping.uid, // 优先使用mac字段，如果没有则使用uid
       deviceNumber: mapping.device_number,
@@ -589,18 +589,18 @@ export const createDeviceMapping = async (mac: string, deviceNumber: string) => 
   try {
     const db = await getDatabase();
     const now = new Date().toISOString();
-    
+
     // 同时插入到两个表中以确保兼容性
     await db.run(
       'INSERT OR REPLACE INTO device_mappings (uid, device_number, create_time) VALUES (?, ?, ?)',
       [mac, deviceNumber, now]
     );
-    
+
     await db.run(
       'INSERT OR REPLACE INTO device_mapping (mac, uid, device_number, created_at) VALUES (?, ?, ?, ?)',
       [mac, mac, deviceNumber, now]
     );
-    
+
     return {
       mac,
       deviceNumber,
@@ -627,14 +627,14 @@ export const getDeviceByNumber = async (deviceNumber: string) => {
 export const deleteDeviceMapping = async (mac: string): Promise<boolean> => {
   try {
     const db = await getDatabase();
-    
+
     // 从两个表中删除以确保兼容性，支持mac和uid字段
     const result1 = await db.run('DELETE FROM device_mappings WHERE uid = ?', [mac]);
     const result2 = await db.run('DELETE FROM device_mapping WHERE mac = ? OR uid = ?', [mac, mac]);
-    
+
     // 如果任一表中有删除操作，则视为成功
-    return (result1.changes !== undefined && result1.changes > 0) || 
-           (result2.changes !== undefined && result2.changes > 0);
+    return (result1.changes !== undefined && result1.changes > 0) ||
+      (result2.changes !== undefined && result2.changes > 0);
   } catch (error) {
     console.error('删除设备映射失败:', error);
     throw error;
@@ -650,16 +650,16 @@ export const getBatteryDataByMac = async (
   deviceNumber?: string
 ): Promise<BatteryData[]> => {
   const db = getDatabase();
-  
+
   try {
     let query = `
       SELECT bd.*
       FROM battery_data bd
     `;
-    
+
     const params: any[] = [];
     let hasWhere = false;
-    
+
     // 根据mac参数决定是否添加mac过滤条件
     if (mac !== 'all') {
       query += ' WHERE bd.mac = ?';
@@ -677,7 +677,7 @@ export const getBatteryDataByMac = async (
       }
       params.push(deviceNumber);
     }
-    
+
     // 根据测试类型决定是否过滤dataready
     // 快速测试模式：只显示dataready=1的数据
     // 周期测试模式：显示所有数据包括dataready=0的数据
@@ -700,7 +700,7 @@ export const getBatteryDataByMac = async (
       }
       params.push(startDate);
     }
-    
+
     if (endDate) {
       if (hasWhere) {
         query += ' AND bd.timestamp <= ?';
@@ -725,7 +725,7 @@ export const getBatteryDataByMac = async (
     query += ' ORDER BY bd.timestamp DESC';
 
     const rows = await db.all(query, ...params);
-    
+
     return rows.map(row => ({
       deviceNumber: row.device_number,
       mac: row.mac,
@@ -769,30 +769,30 @@ export const getBatteryDataByIp = async (
 
     const rows = await db.all(query, ...params);
 
-  return rows.map(row => ({
-    deviceNumber: row.device_number,
-    mac: row.mac,
-    ip_prefix: row.ip_prefix,
-    device_address: row.device_address,
-    rOhm: row.r_ohm,
-    rSei: row.r_sei,
-    rCt: row.r_ct,
-    // 补充电池3和电池4的数据
-    bat3_r1: { value: 0, power: 0, actual: row.bat3_r1 },
-    bat3_r2: { value: 0, power: 0, actual: row.bat3_r2 },
-    bat3_r3: { value: 0, power: 0, actual: row.bat3_r3 },
-    bat4_r1: { value: 0, power: 0, actual: row.bat4_r1 },
-    bat4_r2: { value: 0, power: 0, actual: row.bat4_r2 },
-    bat4_r3: { value: 0, power: 0, actual: row.bat4_r3 },
-    voltage: row.voltage,
-    b2Voltage: row.b2_voltage,
-    testType: row.test_type,
-    timestamp: new Date(row.timestamp)
-  }));
-} catch (error) {
-  console.error('Error getting battery data by IP:', error);
-  throw error;
-}
+    return rows.map(row => ({
+      deviceNumber: row.device_number,
+      mac: row.mac,
+      ip_prefix: row.ip_prefix,
+      device_address: row.device_address,
+      rOhm: row.r_ohm,
+      rSei: row.r_sei,
+      rCt: row.r_ct,
+      // 补充电池3和电池4的数据
+      bat3_r1: { value: 0, power: 0, actual: row.bat3_r1 },
+      bat3_r2: { value: 0, power: 0, actual: row.bat3_r2 },
+      bat3_r3: { value: 0, power: 0, actual: row.bat3_r3 },
+      bat4_r1: { value: 0, power: 0, actual: row.bat4_r1 },
+      bat4_r2: { value: 0, power: 0, actual: row.bat4_r2 },
+      bat4_r3: { value: 0, power: 0, actual: row.bat4_r3 },
+      voltage: row.voltage,
+      b2Voltage: row.b2_voltage,
+      testType: row.test_type,
+      timestamp: new Date(row.timestamp)
+    }));
+  } catch (error) {
+    console.error('Error getting battery data by IP:', error);
+    throw error;
+  }
 };
 
 // 获取数据库中存在的所有IP列表（从battery_data.mac中提取）
@@ -837,10 +837,10 @@ export const exportDataToCSV = async (
 ): Promise<string> => {
   try {
     const data = await getBatteryDataByMac(mac, startDate, endDate, testType, deviceNumber);
-    
+
     const headers = [
       '设备MAC',
-      '设备编号', 
+      '设备编号',
       '时间戳',
       '测试类型',
       '电压(mV)',
@@ -911,7 +911,7 @@ export const exportDataToTXT = async (
 ): Promise<string> => {
   try {
     const data = await getBatteryDataByMac(mac, startDate, endDate, testType, deviceNumber);
-    
+
     const getTestTypeName = (type: FrameType): string => {
       switch (type) {
         case FrameType.CyclicTest: return '周期测试';
@@ -924,7 +924,7 @@ export const exportDataToTXT = async (
     // 定义表格列标题
     const headers = [
       '设备MAC',
-      '设备编号', 
+      '设备编号',
       '时间戳',
       '测试类型',
       '电压(mV)',
@@ -958,7 +958,7 @@ export const exportDataToTXT = async (
 
     // 创建表格标题行，使用制表符分隔
     txtContent += headers.join('\t') + '\r\n';
-    
+
     // 添加分隔线
     txtContent += headers.map(() => '----------').join('\t') + '\r\n';
 
@@ -1141,7 +1141,7 @@ export const exportDataToExcelByIp = async (
 ): Promise<Buffer> => {
   try {
     const data = await getBatteryDataByIp(ip, deviceAddress);
-    
+
     const workbook = new ExcelJS.Workbook();
     workbook.creator = 'WebBattery System';
     workbook.lastModifiedBy = 'WebBattery System';
@@ -1162,37 +1162,37 @@ export const exportDataToExcelByIp = async (
     // 分组数据
     // F1: CyclicTest (0xAA)
     // F2: FastTest (0xFA)
-    const f1Data = data.filter(row => 
-      row.testType === FrameType.CyclicTest || 
-      (row.testType as any) === 'CyclicTest' || 
-      (row.testType as any) === 'F1' || 
+    const f1Data = data.filter(row =>
+      row.testType === FrameType.CyclicTest ||
+      (row.testType as any) === 'CyclicTest' ||
+      (row.testType as any) === 'F1' ||
       (row.testType as any) === 0xAA
     );
-    
-    const f2Data = data.filter(row => 
-      row.testType === FrameType.FastTest || 
-      (row.testType as any) === 'FastTest' || 
-      (row.testType as any) === 'F2' || 
+
+    const f2Data = data.filter(row =>
+      row.testType === FrameType.FastTest ||
+      (row.testType as any) === 'FastTest' ||
+      (row.testType as any) === 'F2' ||
       (row.testType as any) === 0xFA
     );
-    
+
     const otherData = data.filter(row => !f1Data.includes(row) && !f2Data.includes(row));
 
     // 创建 Sheet 的辅助函数
     const createSheet = (sheetName: string, rows: BatteryData[]) => {
       const sheet = workbook.addWorksheet(sheetName);
       sheet.columns = columns;
-      
+
       // 设置表头样式
       sheet.getRow(1).font = { bold: true };
       sheet.getRow(1).alignment = { vertical: 'middle', horizontal: 'center' };
-      
+
       rows.forEach(row => {
         const ipText = row.ip_prefix || ((row.mac || '').split('_')[0] || row.mac || '');
         const addrRaw = row.device_address || ((row.mac || '').split('_')[1] || '');
         const addrText = String(addrRaw).padStart(2, '0');
         const date = new Date(row.timestamp || new Date());
-        
+
         // 格式化时间
         const year = date.getFullYear();
         const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -1202,7 +1202,7 @@ export const exportDataToExcelByIp = async (
         const seconds = String(date.getSeconds()).padStart(2, '0');
         const milliseconds = String(Math.floor(date.getMilliseconds() / 100)).padStart(1, '0');
         const timeStr = `${year}/${month}/${day} ${hours}:${minutes}:${seconds}.${milliseconds}`;
-        
+
         sheet.addRow({
           ip: ipText,
           addr: addrText,
@@ -1218,12 +1218,12 @@ export const exportDataToExcelByIp = async (
     // 始终创建两个主要 Sheet，即使没有数据
     createSheet('周期测试数据(F1)', f1Data);
     createSheet('快速测试数据(F2)', f2Data);
-    
+
     if (otherData.length > 0) {
       createSheet('其他数据', otherData);
     }
 
-    return await workbook.xlsx.writeBuffer() as Buffer;
+    return await workbook.xlsx.writeBuffer() as unknown as Buffer;
   } catch (error) {
     console.error('Error exporting data to Excel:', error);
     throw error;
@@ -1233,7 +1233,7 @@ export const exportDataToExcelByIp = async (
 // 获取设备的测试统计信息
 export const getDeviceTestStatistics = async (mac: string): Promise<any> => {
   const db = getDatabase();
-  
+
   try {
     const stats = await db.get(`
       SELECT 
@@ -1248,10 +1248,10 @@ export const getDeviceTestStatistics = async (mac: string): Promise<any> => {
         AVG(r_ct) as avg_r_ct
       FROM battery_data bd
       WHERE bd.mac = ? AND bd.dataready = 1
-    `, 
-    FrameType.CyclicTest, 
-    FrameType.FastTest, 
-    mac);
+    `,
+      FrameType.CyclicTest,
+      FrameType.FastTest,
+      mac);
 
     return {
       totalTests: stats.total_tests || 0,
@@ -1274,12 +1274,12 @@ export const getDeviceTestStatistics = async (mac: string): Promise<any> => {
 export const clearAllDatabaseData = async (): Promise<boolean> => {
   try {
     const db = getDatabase();
-    
+
     // 清空所有主要数据表
     await db.run('DELETE FROM battery_data');
     await db.run('DELETE FROM device_mappings');
     await db.run('DELETE FROM device_mapping');
-    
+
     console.log('所有数据库数据已清空');
     return true;
   } catch (error) {
