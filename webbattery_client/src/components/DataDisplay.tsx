@@ -220,21 +220,42 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
 
   useEffect(() => {
     const checkOffline = () => {
+      const selectedDeviceNum = parseInt(String(selectedDeviceAddr || ''), 10);
+      const selectedInOnlineList = !isNaN(selectedDeviceNum) && onlineDevices.includes(selectedDeviceNum);
+      const hasAliveConnection = (clients || []).some(c => c.isConnected);
+
       if (!selectedReg?.timestamp) {
-        // 如果从来没有时间戳，视作离线或未连接
-        setIsSelectedDeviceOffline(true);
+        // 有在线扫描结果或连接存活时，避免误报离线
+        setIsSelectedDeviceOffline(!(selectedInOnlineList || hasAliveConnection));
         return;
       }
+
       const lastTime = new Date(selectedReg.timestamp).getTime();
       const diff = Date.now() - lastTime;
-      // 超过12000ms视为离线
-      setIsSelectedDeviceOffline(diff > 12000);
+
+      // 动态超时阈值：F1周期可配置，F2固定高频，空闲态放宽
+      const timeoutMs = testingState.isF1Testing
+        ? Math.max(12000, getEffectiveLoopPeriodSeconds() * 1000 + 3000)
+        : testingState.isF2Testing
+          ? 12000
+          : 30000;
+
+      // 若扫描仍判定在线，则不提示离线；否则按时间戳判定
+      setIsSelectedDeviceOffline(!selectedInOnlineList && diff > timeoutMs);
     };
 
     checkOffline(); // Initial check
     const timer = setInterval(checkOffline, 1000); // Periodic check
     return () => clearInterval(timer);
-  }, [selectedReg?.timestamp]);
+  }, [
+    selectedReg?.timestamp,
+    selectedDeviceAddr,
+    onlineDevices,
+    clients,
+    testingState.isF1Testing,
+    testingState.isF2Testing,
+    getEffectiveLoopPeriodSeconds
+  ]);
 
   // 监听后端测试状态变更
   useEffect(() => {
@@ -549,6 +570,44 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
             return [processedData, ...prev].slice(0, 200); // 限制最多显示200条
           }
         });
+
+        // 将电池数据中的寄存器字段回填到寄存器缓存，保证解析页及时刷新
+        const statusRaw =
+          (typeof processedData.statusRegister === 'number' ? processedData.statusRegister : undefined)
+          ?? (typeof processedData.status?.statusRegister === 'number' ? processedData.status.statusRegister : undefined)
+          ?? (typeof processedData.status?.rawValue === 'number' ? processedData.status.rawValue : undefined)
+          ?? (typeof processedData.statusBits?.rawValue === 'number' ? processedData.statusBits.rawValue : undefined);
+
+        const controlA =
+          (typeof processedData.controlRegisterA === 'number' ? processedData.controlRegisterA : undefined)
+          ?? (typeof processedData.controlA === 'number' ? processedData.controlA : undefined)
+          ?? (typeof processedData.status?.controlRegisterA === 'number' ? processedData.status.controlRegisterA : undefined);
+
+        const controlB =
+          (typeof processedData.controlRegisterB === 'number' ? processedData.controlRegisterB : undefined)
+          ?? (typeof processedData.controlB === 'number' ? processedData.controlB : undefined)
+          ?? (typeof processedData.status?.controlRegisterB === 'number' ? processedData.status.controlRegisterB : undefined);
+
+        const ipText = String(processedData.ip_prefix || '').trim();
+        const addrNum = parseInt(String(processedData.deviceAddress ?? processedData.device_address ?? ''), 10);
+        if (ipText && !isNaN(addrNum)) {
+          const key = `${ipText}_${String(addrNum).padStart(2, '0')}`;
+          const fallbackTimestamp = typeof processedData.timestamp === 'string'
+            ? processedData.timestamp
+            : new Date(processedData.timestamp || Date.now()).toISOString();
+
+          setRegisterStatusByDevice(prev => ({
+            ...prev,
+            [key]: {
+              statusRegister: typeof statusRaw === 'number' ? statusRaw : (prev[key]?.statusRegister ?? 0),
+              controlRegisterA: typeof controlA === 'number' ? controlA : (prev[key]?.controlRegisterA ?? 0),
+              controlRegisterB: typeof controlB === 'number' ? controlB : (prev[key]?.controlRegisterB ?? 0),
+              r1: processedData.r1?.actual ?? processedData.rOhm ?? prev[key]?.r1 ?? 0,
+              r2: processedData.r2?.actual ?? processedData.rSei ?? prev[key]?.r2 ?? 0,
+              timestamp: fallbackTimestamp
+            }
+          }));
+        }
 
         // 更新最后刷新时间
         setLastRefresh(new Date());
@@ -982,10 +1041,11 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
     return undefined;
   };
   const displayStatusRawValue = (() => {
+    // 优先使用当前选中设备的缓存值，确保寄存器解析页与设备选择一致
+    if (typeof selectedReg?.statusRegister === 'number') return selectedReg.statusRegister;
     const fromRow = deriveStatusRawFromRow(latestDisplayRow);
     if (typeof fromRow === 'number') return fromRow;
-    // 回退到所选设备的缓存值
-    return (selectedReg?.statusRegister ?? 0);
+    return 0;
   })();
   const parsedStatusDisplay = {
     measEnable: (displayStatusRawValue & 0x0001) !== 0,

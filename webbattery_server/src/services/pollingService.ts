@@ -51,6 +51,12 @@ interface DeviceData {
   errorCount: number;
 }
 
+interface DeviceStatusSnapshot {
+  statusRegister: number;
+  controlRegisterA: number;
+  controlRegisterB: number;
+}
+
 // 寄存器地址定义 (按照GET3017协议)
 // 写入命令(广播): UnitID = 0xFF
 // 读数据命令(单播): UnitID = 1~128
@@ -89,13 +95,24 @@ function getNextTransactionId(): number {
 }
 
 // 读取状态寄存器 (特定Unit)
-export const readDeviceStatus = async (connectionId: string, unitId: number): Promise<number | null> => {
+export const readDeviceStatus = async (connectionId: string, unitId: number): Promise<DeviceStatusSnapshot | null> => {
   try {
     const txId = getNextTransactionId();
     // 读取3个寄存器 0x0000~0x0002（按协议要求）
     const buffer = await readHoldingRegistersWithFixedTxId(connectionId, txId, REGISTERS.STATUS, REGISTERS.STATUS_READ_COUNT, unitId);
+    if (buffer && buffer.length >= 6) {
+      return {
+        statusRegister: buffer.readUInt16BE(0),
+        controlRegisterA: buffer.readUInt16BE(2),
+        controlRegisterB: buffer.readUInt16BE(4)
+      };
+    }
     if (buffer && buffer.length >= 2) {
-      return buffer.readUInt16BE(0);
+      return {
+        statusRegister: buffer.readUInt16BE(0),
+        controlRegisterA: 0,
+        controlRegisterB: 0
+      };
     }
     return null;
   } catch (error) {
@@ -613,6 +630,8 @@ export const startF1CyclicPolling = async (
 
     const allConnections = getClientConnections();
     const targetConnection = allConnections.find(c => c.id === connectionId || c.connectionId === connectionId);
+    const host = targetConnection?.host || '';
+    const io = getSocketIOInstance();
 
     if (!targetConnection) {
       console.warn(`F1启动: 找不到连接 ${connectionId}`);
@@ -661,10 +680,37 @@ export const startF1CyclicPolling = async (
           if (!controller.active) break;
 
           // 2.1 读取状态寄存器(0x0000)
-          const status = await readDeviceStatus(connectionId, unitId);
-          if (status === null) {
+          const statusSnapshot = await readDeviceStatus(connectionId, unitId);
+          if (statusSnapshot === null) {
             continue;
           }
+
+          const status = statusSnapshot.statusRegister;
+          const measEnable = (status & STATUS_MASK.MEAS_ENABLE) !== 0;
+          const testDone = (status & STATUS_MASK.TEST_DONE) !== 0;
+          const dataReady = (status & STATUS_MASK.DATA_READY) !== 0;
+          const statusMac = host ? `${host}_${unitId.toString().padStart(2, '0')}` : '';
+
+          // F1每次检测都同步到前端寄存器解析页
+          io?.emit('registerStatusUpdate', {
+            connectionId,
+            host,
+            unitId,
+            deviceAddress: unitId,
+            mac: statusMac || undefined,
+            statusRegister: status,
+            controlRegisterA: statusSnapshot.controlRegisterA,
+            controlRegisterB: statusSnapshot.controlRegisterB,
+            statusBits: {
+              measEnable,
+              testDone,
+              dataReady,
+              rawValue: status,
+              binaryString: status.toString(2).padStart(16, '0')
+            },
+            timestamp: new Date().toISOString(),
+            isRegisterUpdate: true
+          });
 
           if ((status & STATUS_MASK.COMM_TIMEOUT) !== 0) {
             console.warn(`Unit ${unitId} 报告 COMM_TIMEOUT (0x${status.toString(16)}) -> 触发恢复流程`);
@@ -679,8 +725,6 @@ export const startF1CyclicPolling = async (
         }
 
         if (recoveryTriggered && controller.active) {
-          const io = getSocketIOInstance();
-
           // 1. 界面告警
           io.emit('testStateChange', { state: 'COMM_ERROR', connectionId, testType: 'F1' });
           console.warn(` [F1故障] 检测到通信错误，执行恢复流程: 停止 -> 恢复 -> 重启`);
@@ -794,6 +838,8 @@ export const startF2FastPolling = async (connectionId: string, targetUnitId: num
           const sBuf = await readHoldingRegistersWithFixedTxId(connectionId, getNextTransactionId(), REGISTERS.STATUS, REGISTERS.STATUS_READ_COUNT, targetUnitId);
           if (sBuf && sBuf.length >= 2) {
             const stValue = sBuf.readUInt16BE(0);
+            const controlRegisterA = sBuf.length >= 4 ? sBuf.readUInt16BE(2) : 0;
+            const controlRegisterB = sBuf.length >= 6 ? sBuf.readUInt16BE(4) : 0;
             const measEnable = (stValue & STATUS_MASK.MEAS_ENABLE) !== 0;
             const testDone = (stValue & STATUS_MASK.TEST_DONE) !== 0;
 
@@ -805,6 +851,8 @@ export const startF2FastPolling = async (connectionId: string, targetUnitId: num
               deviceAddress: targetUnitId,
               mac: statusMac || undefined,
               statusRegister: stValue,
+              controlRegisterA,
+              controlRegisterB,
               statusBits: {
                 measEnable,
                 testDone,
@@ -920,6 +968,8 @@ export const startF2FastPolling = async (connectionId: string, targetUnitId: num
           const cBuf = await readHoldingRegistersWithFixedTxId(connectionId, getNextTransactionId(), REGISTERS.STATUS, REGISTERS.STATUS_READ_COUNT, targetUnitId);
           if (cBuf && cBuf.length >= 2) {
             const cValue = cBuf.readUInt16BE(0);
+            const controlRegisterA = cBuf.length >= 4 ? cBuf.readUInt16BE(2) : 0;
+            const controlRegisterB = cBuf.length >= 6 ? cBuf.readUInt16BE(4) : 0;
             const cooldownMeasEnable = (cValue & STATUS_MASK.MEAS_ENABLE) !== 0;
             const cooldownTestDone = (cValue & STATUS_MASK.TEST_DONE) !== 0;
 
@@ -930,6 +980,8 @@ export const startF2FastPolling = async (connectionId: string, targetUnitId: num
               deviceAddress: targetUnitId,
               mac: statusMac || undefined,
               statusRegister: cValue,
+              controlRegisterA,
+              controlRegisterB,
               statusBits: {
                 measEnable: cooldownMeasEnable,
                 testDone: cooldownTestDone,

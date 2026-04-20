@@ -16,18 +16,19 @@ export async function saveBatteryData(data: BatteryData): Promise<number> {
     }
 
     // 修改映射关系：r1→R_ohm，r2→R_sei，r3→R_ct
-    const r1Value = data.r_ohm?.actual || data.r1?.actual || data.rOhm || null;
-    const r2Value = data.r_sei?.actual || data.r2?.actual || data.rSei || null;
-    const r3Value = data.r_ct?.actual || data.r3?.actual || data.rCt || null;
+    // 使用空值合并，保留0值（避免0被误判为null）
+    const r1Value = data.r_ohm?.actual ?? data.r1?.actual ?? data.rOhm ?? null;
+    const r2Value = data.r_sei?.actual ?? data.r2?.actual ?? data.rSei ?? null;
+    const r3Value = data.r_ct?.actual ?? data.r3?.actual ?? data.rCt ?? null;
 
     // 获取电池3和电池4的阻抗值
-    const bat3R1 = data.bat3_r1?.actual || null;
-    const bat3R2 = data.bat3_r2?.actual || null;
-    const bat3R3 = data.bat3_r3?.actual || null;
+    const bat3R1 = data.bat3_r1?.actual ?? null;
+    const bat3R2 = data.bat3_r2?.actual ?? null;
+    const bat3R3 = data.bat3_r3?.actual ?? null;
 
-    const bat4R1 = data.bat4_r1?.actual || null;
-    const bat4R2 = data.bat4_r2?.actual || null;
-    const bat4R3 = data.bat4_r3?.actual || null;
+    const bat4R1 = data.bat4_r1?.actual ?? null;
+    const bat4R2 = data.bat4_r2?.actual ?? null;
+    const bat4R3 = data.bat4_r3?.actual ?? null;
 
     // 使用当前系统真实时间作为时间戳
     const timestamp = data.timestamp || new Date().toISOString();
@@ -1175,7 +1176,11 @@ export const exportDataToExcelByIp = async (
     // 兼容两种字段形态：{ actual } 对象或直接数值
     const pickActual = (value: any): number | string => {
       if (value === null || value === undefined) return '';
-      if (typeof value === 'object' && value.actual !== undefined && value.actual !== null) return value.actual;
+      if (typeof value === 'object') {
+        if (value.actual !== undefined && value.actual !== null) return value.actual;
+        if (value.value !== undefined && value.value !== null) return value.value;
+        return '';
+      }
       return value;
     };
 
@@ -1228,9 +1233,9 @@ export const exportDataToExcelByIp = async (
           addr: addrText,
           time: timeStr,
           voltage: row.voltage,
-          r1: row.r1?.actual || row.rOhm || '',
-          r2: row.r2?.actual || row.rSei || '',
-          r3: row.r3?.actual || row.rCt || '',
+          r1: pickActual((row as any).r1 ?? row.rOhm),
+          r2: pickActual((row as any).r2 ?? row.rSei),
+          r3: pickActual((row as any).r3 ?? row.rCt),
           bat3_r1: pickActual((row as any).bat3_r1),
           bat3_r2: pickActual((row as any).bat3_r2),
           bat3_r3: pickActual((row as any).bat3_r3),
