@@ -53,16 +53,20 @@ interface DeviceData {
 
 // 寄存器地址定义 (按照GET3017协议)
 // 写入命令(广播): UnitID = 0xFF
-// 读数据命令(单播): UnitID = 1~24
+// 读数据命令(单播): UnitID = 1~128
 const REGISTERS = {
   DATA_START: 0x0000,        // 数据起始地址
   DATA_COUNT: 13,            // 数据读取长度 (0x0000 ~ 0x000C)
   STATUS: 0x0000,            // 状态寄存器
+  STATUS_READ_COUNT: 3,      // 读取0x0000~0x0002（状态+控制A+控制B）
   CONTROL_CYCLE: 0x0002,     // 启动(写周期)/停止(写0)地址
   BROADCAST_UNIT_ID: 0xFF,   // 广播/控制 Unit ID
   CONTROL_A: 0x0001,
   CONTROL_B: 0x0002
 };
+
+const DEVICE_UNIT_MIN = 1;
+const DEVICE_UNIT_MAX = 128;
 
 // 状态位掩码
 const STATUS_MASK = {
@@ -88,8 +92,8 @@ function getNextTransactionId(): number {
 export const readDeviceStatus = async (connectionId: string, unitId: number): Promise<number | null> => {
   try {
     const txId = getNextTransactionId();
-    // 读取1个寄存器 0x0000
-    const buffer = await readHoldingRegistersWithFixedTxId(connectionId, txId, REGISTERS.STATUS, 1, unitId);
+    // 读取3个寄存器 0x0000~0x0002（按协议要求）
+    const buffer = await readHoldingRegistersWithFixedTxId(connectionId, txId, REGISTERS.STATUS, REGISTERS.STATUS_READ_COUNT, unitId);
     if (buffer && buffer.length >= 2) {
       return buffer.readUInt16BE(0);
     }
@@ -103,7 +107,7 @@ export const readDeviceStatus = async (connectionId: string, unitId: number): Pr
 export const readDeviceData = async (
   connectionId: string,
   targetUnitId: number = 1,
-  logContext?: 'F1_POLLING'
+  logContext?: 'F1_POLLING' | 'F2_HARVEST'
 ): Promise<DeviceData | null> => {
   try {
     const txId = getNextTransactionId();
@@ -113,6 +117,10 @@ export const readDeviceData = async (
       const txHex = txId.toString(16).toUpperCase().padStart(4, '0');
       const unitHex = targetUnitId.toString(16).toUpperCase().padStart(2, '0');
       console.log(`F1轮询读取帧 ${connectionId}: ${txHex.slice(0, 2)} ${txHex.slice(2)} 00 00 00 06 ${unitHex} 03 00 00 00 0D`);
+    } else if (logContext === 'F2_HARVEST') {
+      const txHex = txId.toString(16).toUpperCase().padStart(4, '0');
+      const unitHex = targetUnitId.toString(16).toUpperCase().padStart(2, '0');
+      console.log(`[F2阶段4] 读取完整数据帧 ${connectionId}: ${txHex.slice(0, 2)} ${txHex.slice(2)} 00 00 00 06 ${unitHex} 03 00 00 00 0D`);
     }
 
     // 读取13个寄存器
@@ -190,7 +198,7 @@ export const readDeviceData = async (
 
 // 静默读取设备数据 (0x0000-0x0007) — 仅用于扫描
 // 与 readDeviceData 的区别：不调用 sendDataToFrontend()，不写 deviceStates 缓存
-// 这样扫描24个 UID 时不会向前端发送 batteryUpdate 事件，也不会污染数据表格
+// 这样扫描128个 UID 时不会向前端发送 batteryUpdate 事件，也不会污染数据表格
 const readDeviceDataSilently = async (connectionId: string, targetUnitId: number): Promise<boolean> => {
   try {
     const txId = getNextTransactionId();
@@ -235,20 +243,21 @@ export const getAllDevicesData = async (): Promise<DeviceData[]> => {
   return results;
 };
 
-// 扫描 1-24 设备是否在线
+// 扫描 1-128 设备是否在线
 export const scanOnlineDevices = async (connectionId: string): Promise<{
   onlineDevices: number[];
   totalScanned: number;
 }> => {
   const onlineDevices: number[] = [];
   const io = getSocketIOInstance();
+  const totalScanned = DEVICE_UNIT_MAX - DEVICE_UNIT_MIN + 1;
 
-  console.log(`[Scan] 开始扫描连接 ${connectionId} 的所有设备 (1-24)`);
+  console.log(`[Scan] 开始扫描连接 ${connectionId} 的所有设备 (${DEVICE_UNIT_MIN}-${DEVICE_UNIT_MAX})`);
 
   // 发送开始事件
-  io.emit('deviceScanStarted', { connectionId, total: 24 });
+  io.emit('deviceScanStarted', { connectionId, total: totalScanned });
 
-  for (let unitId = 1; unitId <= 24; unitId++) {
+  for (let unitId = DEVICE_UNIT_MIN; unitId <= DEVICE_UNIT_MAX; unitId++) {
     try {
       // 通过静默读取判断是否在线（不触发 batteryUpdate 事件）
       const isOnline = await readDeviceDataSilently(connectionId, unitId);
@@ -262,7 +271,7 @@ export const scanOnlineDevices = async (connectionId: string): Promise<{
         unitId,
         online: isOnline,
         progress: unitId,
-        total: 24
+        total: totalScanned
       });
 
     } catch (error) {
@@ -271,7 +280,7 @@ export const scanOnlineDevices = async (connectionId: string): Promise<{
         unitId,
         online: false,
         progress: unitId,
-        total: 24
+        total: totalScanned
       });
     }
 
@@ -284,10 +293,10 @@ export const scanOnlineDevices = async (connectionId: string): Promise<{
   io.emit('deviceScanComplete', {
     connectionId,
     onlineDevices,
-    totalScanned: 24
+    totalScanned
   });
 
-  return { onlineDevices, totalScanned: 24 };
+  return { onlineDevices, totalScanned };
 };
 
 
@@ -511,9 +520,6 @@ interface PollingTimer {
 // 全局轮询定时器映射
 const pollingTimers = new Map<string, PollingTimer>();
 
-// 冷却时间管理
-const cooldowns = new Map<string, number>(); // connectionId -> cooldownEndTime (timestamp)
-
 // 删除寄存器监控相关的函数，不再需要处理状态寄存器与控制寄存器
 
 // 恢复错误状态：停止 -> 快速读取直到 clean -> 返回
@@ -613,16 +619,16 @@ export const startF1CyclicPolling = async (
       return false;
     }
 
-    // 如果传入了目标设备列表，只轮询这些设备；否则轮询全部 24 个从机
+    // 如果传入了目标设备列表，只轮询这些设备；否则轮询全部 128 个从机
     const unitIds = (targetDevices && targetDevices.length > 0)
-      ? targetDevices.map(Number).filter(n => n >= 1 && n <= 24)
-      : Array.from({ length: 24 }, (_, i) => i + 1);
+      ? targetDevices.map(Number).filter(n => n >= DEVICE_UNIT_MIN && n <= DEVICE_UNIT_MAX)
+      : Array.from({ length: DEVICE_UNIT_MAX - DEVICE_UNIT_MIN + 1 }, (_, i) => DEVICE_UNIT_MIN + i);
 
     if (targetDevices && targetDevices.length > 0) {
       console.log(`[F1] 使用目标设备列表: [${unitIds.join(', ')}] (共 ${unitIds.length} 个)`);
     }
 
-    console.log(` [F1 Start] 周期:${periodSeconds}s, Conn:${connectionId}, Units:1-24`);
+    console.log(` [F1 Start] 周期:${periodSeconds}s, Conn:${connectionId}, Units:${DEVICE_UNIT_MIN}-${DEVICE_UNIT_MAX}`);
 
     // 0. 初始恢复检查
     console.log(`Running initial recovery check...`);
@@ -730,24 +736,15 @@ export const startF1CyclicPolling = async (
 };
 
 
-// F2快速轮询：写命令启动，静默25秒，随后每1秒检查TEST_DONE，成功后50ms读取60次，最后30秒冷却
+// F2快速轮询：写命令启动后每秒读取状态寄存器并解析；
+// 检测到 TEST_DONE=1 后以 10ms 频率读取 60 次（约0.6秒），
+// 然后继续每秒读取 MEAS_ENABLE，检测到 Bit0=0 即判定冷却结束（阶段5），超时40秒
 export const startF2FastPolling = async (connectionId: string, targetUnitId: number = 1): Promise<boolean> => {
   try {
     const io = getSocketIOInstance();
-
-    // 检查冷却时间
-    const cooldownEnd = cooldowns.get(connectionId);
-    if (cooldownEnd && Date.now() < cooldownEnd) {
-      const remaining = Math.ceil((cooldownEnd - Date.now()) / 1000);
-      console.log(` F2测试冷却中 ${connectionId}: 剩余${remaining}秒`);
-      io?.emit('testStateChange', {
-        state: 'TESTING',
-        connectionId,
-        message: `F2快速测试处于冷却期，剩余${remaining}秒`,
-        testType: 'F2'
-      });
-      return false;
-    }
+    const targetConnection = getClientConnections().find(c => c.id === connectionId || c.connectionId === connectionId);
+    const host = targetConnection?.host || '';
+    const statusMac = host ? `${host}_${targetUnitId.toString().padStart(2, '0')}` : '';
 
     // 检查是否应该启用轮询
     if (!shouldEnablePolling()) {
@@ -767,60 +764,99 @@ export const startF2FastPolling = async (connectionId: string, targetUnitId: num
     io?.emit('testStateChange', {
       state: 'TESTING',
       connectionId,
-      message: '阶段2：命令写入成功，正在进行F2快速测试',
+      message: '阶段2：命令写入成功，开始每秒读取状态寄存器',
       testType: 'F2'
     });
 
     const startTime = Date.now();
+    const controller = { active: true };
+
+    // 提前注册到系统，确保在状态轮询阶段也可以被 stopPolling 及时停止
+    pollingTimers.set(connectionId, {
+      timer: null,
+      type: 'F2',
+      connectionId,
+      targetUnitId,
+      startTime,
+      readCount: 0,
+      controller
+    });
 
     // 我们在这里使用异步自执行闭包，不堵塞轮询管理，独立运行F2全套阶段
     (async () => {
       try {
-        console.log(` F2快速轮询 ${connectionId}: 阶段2/进入25秒静默等待大循环...`);
-        // 25秒静默等待
-        await new Promise(r => setTimeout(r, 25000));
-        console.log(` F2快速轮询 ${connectionId}: 25秒静默结束，阶段3/开始探测状态寄存器TEST_DONE位`);
-        io?.emit('testStateChange', {
-          state: 'TESTING',
-          connectionId,
-          message: '25秒静默期结束，开始每秒检测 test_done',
-          testType: 'F2'
-        });
+        console.log(` F2快速轮询 ${connectionId}: 阶段3/开始每秒探测状态寄存器`);
 
-        // 探测阶段：每秒读一次 0x0000 直到获得 TEST_DONE 或超时 (最多给10次=10秒)
+        // 探测阶段：每秒读一次 0x0000 并解析 MEAS_ENABLE/TEST_DONE，直到获得 TEST_DONE 或超时
         let isDone = false;
-        for (let i = 0; i < 10; i++) {
-          const sBuf = await readHoldingRegistersWithFixedTxId(connectionId, getNextTransactionId(), REGISTERS.STATUS, 1, targetUnitId);
+        const maxStatusChecks = 40;
+        for (let i = 0; i < maxStatusChecks && controller.active; i++) {
+          const sBuf = await readHoldingRegistersWithFixedTxId(connectionId, getNextTransactionId(), REGISTERS.STATUS, REGISTERS.STATUS_READ_COUNT, targetUnitId);
           if (sBuf && sBuf.length >= 2) {
             const stValue = sBuf.readUInt16BE(0);
+            const measEnable = (stValue & STATUS_MASK.MEAS_ENABLE) !== 0;
             const testDone = (stValue & STATUS_MASK.TEST_DONE) !== 0;
-            console.log(` F2快速轮询 ${connectionId}: test_done=${testDone ? 1 : 0}, status=0x${stValue.toString(16).padStart(4, '0')}`);
+
+            // 每秒把状态寄存器结果反馈到前端状态寄存器表
+            io?.emit('registerStatusUpdate', {
+              connectionId,
+              host,
+              unitId: targetUnitId,
+              deviceAddress: targetUnitId,
+              mac: statusMac || undefined,
+              statusRegister: stValue,
+              statusBits: {
+                measEnable,
+                testDone,
+                rawValue: stValue,
+                binaryString: stValue.toString(2).padStart(16, '0')
+              },
+              timestamp: new Date().toISOString(),
+              isRegisterUpdate: true
+            });
+
+            console.log(` F2快速轮询 ${connectionId}: meas_enable=${measEnable ? 1 : 0}, test_done=${testDone ? 1 : 0}, status=0x${stValue.toString(16).padStart(4, '0')}`);
             io?.emit('testStateChange', {
               state: 'TESTING',
               connectionId,
-              message: `test_done = ${testDone ? 1 : 0}`,
-              testType: 'F2'
+              message: `快速测试状态：MEAS_ENABLE=${measEnable ? 1 : 0}, TEST_DONE=${testDone ? 1 : 0}`,
+              testType: 'F2',
+              measEnable,
+              testDone,
+              statusRegister: stValue
             });
 
             if (testDone) {
-              console.log(` F2快速轮询 ${connectionId}: test_done = 1，快速测试流程结束，开始接收数据`);
-              // 首次检测到 TEST_DONE=1 时立即开始 30 秒冷却，
-              // 这样前端可以在“读取数据”阶段同步展示冷却倒计时。
-              const cooldownDurationMs = 30000;
-              const cooldownSeconds = Math.ceil(cooldownDurationMs / 1000);
-              cooldowns.set(connectionId, Date.now() + cooldownDurationMs);
+              console.log(` F2快速轮询 ${connectionId}: TEST_DONE=1，快速测试流程结束，开始接收数据`);
               io?.emit('testStateChange', {
                 state: 'TESTING',
                 connectionId,
-                message: 'TEST_DONE = 1，开始获取数据',
+                message: 'TEST_DONE = 1，正在获取数据',
                 testType: 'F2',
-                cooldownSeconds
+                measEnable,
+                testDone: true,
+                statusRegister: stValue
               });
               isDone = true;
               break;
             }
+          } else {
+            io?.emit('testStateChange', {
+              state: 'TESTING',
+              connectionId,
+              message: '状态寄存器读取失败，等待下一次轮询',
+              testType: 'F2'
+            });
           }
-          await new Promise(r => setTimeout(r, 1000));
+
+          if (controller.active) {
+            await new Promise(r => setTimeout(r, 1000));
+          }
+        }
+
+        if (!controller.active) {
+          console.log(` F2快速轮询 ${connectionId}: 状态轮询阶段已停止`);
+          return;
         }
 
         if (!isDone) {
@@ -831,63 +867,140 @@ export const startF2FastPolling = async (connectionId: string, targetUnitId: num
             message: 'F2快速测试等待 test_done 超时，请重试',
             testType: 'F2'
           });
+          stopPolling(connectionId);
           return;
         }
 
-        // 阶段4: 数据收割 (每50ms收割一次)
-        console.log(` F2快速轮询 ${connectionId}: 开始50ms高频数据收割，限额60次`);
+        // 阶段4: 数据收割 (每10ms收割一次，60次约0.6秒)
+        console.log(` F2快速轮询 ${connectionId}: 开始10ms高频数据收割，限额60次（约0.6秒）`);
         let readCount = 0;
         const maxReads = 60;
+        const harvestIntervalMs = 10;
 
-        const harvestTimer = setInterval(async () => {
+        for (let i = 0; i < maxReads && controller.active; i++) {
+          readCount = i + 1;
           try {
-            readCount++;
-            await readDeviceData(connectionId, targetUnitId);
-
-            if (readCount >= maxReads) {
-              clearInterval(harvestTimer);
-              console.log(` F2快速轮询 ${connectionId}: 60次数据收割完毕`);
-
-              // 停止此设备相关的记录状态
-              stopPolling(connectionId);
-
-              io?.emit('testStateChange', {
-                state: 'TESTING',
-                connectionId,
-                message: '数据读取结束，共六十条',
-                testType: 'F2'
-              });
-
-              // 发送完成事件
-              const cooldownEndTs = cooldowns.get(connectionId) || Date.now();
-              const remainingCooldown = Math.max(0, Math.ceil((cooldownEndTs - Date.now()) / 1000));
-              if (io) {
-                io.emit('testCompleted', {
-                  testType: 'F2',
-                  deviceId: connectionId,
-                  validDataCount: readCount,
-                  timestamp: new Date().toISOString(),
-                  cooldown: remainingCooldown
-                });
-              }
-            }
+            await readDeviceData(connectionId, targetUnitId, 'F2_HARVEST');
           } catch (e) {
             console.error('获取数据出错', e);
           }
-        }, 50); // 50ms
 
-        // 注册到系统，让stopPolling能强制干掉它
-        pollingTimers.set(connectionId, {
-          timer: harvestTimer,
-          type: 'F2',
+          const pollingInfo = pollingTimers.get(connectionId);
+          if (pollingInfo) {
+            pollingInfo.readCount = readCount;
+          }
+
+          if (controller.active && i < maxReads - 1) {
+            await new Promise(r => setTimeout(r, harvestIntervalMs));
+          }
+        }
+
+        if (!controller.active) {
+          return;
+        }
+
+        console.log(` F2快速轮询 ${connectionId}: 60次数据收割完毕`);
+
+        io?.emit('testStateChange', {
+          state: 'TESTING',
           connectionId,
-          targetUnitId,
-          startTime,
-          readCount: 0
+          message: '数据读取结束，共六十条，开始每秒检测 MEAS_ENABLE 是否复位',
+          testType: 'F2'
+        });
+
+        // 数据读取后进入冷却监测阶段：每秒读取Bit0(MEAS_ENABLE)，置0即阶段5
+        const pollingInfo = pollingTimers.get(connectionId);
+        if (pollingInfo) {
+          pollingInfo.timer = null;
+        }
+
+        const maxCooldownChecks = 40;
+        let cooldownEnded = false;
+        for (let i = 0; i < maxCooldownChecks && controller.active; i++) {
+          const cBuf = await readHoldingRegistersWithFixedTxId(connectionId, getNextTransactionId(), REGISTERS.STATUS, REGISTERS.STATUS_READ_COUNT, targetUnitId);
+          if (cBuf && cBuf.length >= 2) {
+            const cValue = cBuf.readUInt16BE(0);
+            const cooldownMeasEnable = (cValue & STATUS_MASK.MEAS_ENABLE) !== 0;
+            const cooldownTestDone = (cValue & STATUS_MASK.TEST_DONE) !== 0;
+
+            io?.emit('registerStatusUpdate', {
+              connectionId,
+              host,
+              unitId: targetUnitId,
+              deviceAddress: targetUnitId,
+              mac: statusMac || undefined,
+              statusRegister: cValue,
+              statusBits: {
+                measEnable: cooldownMeasEnable,
+                testDone: cooldownTestDone,
+                rawValue: cValue,
+                binaryString: cValue.toString(2).padStart(16, '0')
+              },
+              timestamp: new Date().toISOString(),
+              isRegisterUpdate: true
+            });
+
+            io?.emit('testStateChange', {
+              state: 'TESTING',
+              connectionId,
+              message: `冷却状态监测：MEAS_ENABLE=${cooldownMeasEnable ? 1 : 0}, TEST_DONE=${cooldownTestDone ? 1 : 0}`,
+              testType: 'F2',
+              measEnable: cooldownMeasEnable,
+              testDone: cooldownTestDone,
+              statusRegister: cValue
+            });
+
+            if (!cooldownMeasEnable) {
+              cooldownEnded = true;
+              io?.emit('testStateChange', {
+                state: 'IDLE',
+                connectionId,
+                message: '阶段5：冷却保护结束，可以进行新的测试',
+                testType: 'F2',
+                measEnable: false,
+                testDone: cooldownTestDone,
+                statusRegister: cValue
+              });
+              break;
+            }
+          } else {
+            io?.emit('testStateChange', {
+              state: 'TESTING',
+              connectionId,
+              message: '冷却状态寄存器读取失败，等待下一次轮询',
+              testType: 'F2'
+            });
+          }
+
+          if (controller.active) {
+            await new Promise(r => setTimeout(r, 1000));
+          }
+        }
+
+        if (!controller.active) {
+          return;
+        }
+
+        if (!cooldownEnded) {
+          io?.emit('testStateChange', {
+            state: 'IDLE',
+            connectionId,
+            message: '冷却状态监测超时（40秒），请检查设备状态',
+            testType: 'F2'
+          });
+        }
+
+        stopPolling(connectionId, {
+          sendF2StopCommand: false,
+          reason: 'F2流程自然结束'
         });
 
       } catch (err) {
         console.error(` F2全流程执行失败 ${connectionId}:`, err);
+        stopPolling(connectionId, {
+          sendF2StopCommand: true,
+          reason: 'F2流程异常终止'
+        });
       }
     })();
 
@@ -900,10 +1013,19 @@ export const startF2FastPolling = async (connectionId: string, targetUnitId: num
   }
 };
 
+interface StopPollingOptions {
+  sendF2StopCommand?: boolean;
+  f2StopValue?: number;
+  reason?: string;
+}
+
 // 停止轮询
-export const stopPolling = (connectionId: string): boolean => {
+export const stopPolling = (connectionId: string, options?: StopPollingOptions): boolean => {
   const pollingInfo = pollingTimers.get(connectionId);
   if (pollingInfo) {
+    const sendF2StopCommand = options?.sendF2StopCommand ?? true;
+    const f2StopValue = options?.f2StopValue ?? 0x0002;
+
     if (pollingInfo.timer) clearInterval(pollingInfo.timer);
     if (pollingInfo.controller) pollingInfo.controller.active = false; // 停止异步循环
     pollingTimers.delete(connectionId);
@@ -919,19 +1041,23 @@ export const stopPolling = (connectionId: string): boolean => {
         }
       });
     } else if (pollingInfo.type === 'F2') {
-      // F2 停止命令: 写 0x0000 到 CONTROL_A 0x0006 以停止测试 (针对特定 targetUnitId)
-      const connections = getClientConnections();
-      connections.forEach(conn => {
-        if (conn.isConnected) {
-          const txId = getNextTransactionId();
-          const targetUnitId = pollingInfo.targetUnitId;
-          writeSingleRegisterWithFixedTxId(conn.id, txId, REGISTERS.CONTROL_A, 0x0000, targetUnitId)
-            .catch(e => console.error(`F2停止命令发送失败 ${conn.id}:`, e));
-        }
-      });
+      // F2 手动停止命令: 写 0x0002 到 CONTROL_A(0x0001) 强制中止
+      if (sendF2StopCommand) {
+        const connections = getClientConnections();
+        connections.forEach(conn => {
+          if (conn.isConnected) {
+            const txId = getNextTransactionId();
+            const targetUnitId = pollingInfo.targetUnitId;
+            writeSingleRegisterWithFixedTxId(conn.id, txId, REGISTERS.CONTROL_A, f2StopValue, targetUnitId)
+              .catch(e => console.error(`F2停止命令发送失败 ${conn.id}:`, e));
+          }
+        });
+      } else {
+        console.log(` F2轮询自然结束 ${connectionId}: 不发送F2停止写命令`);
+      }
     }
 
-    console.log(` ${pollingInfo.type}轮询已停止 ${connectionId}`);
+    console.log(` ${pollingInfo.type}轮询已停止 ${connectionId} (${options?.reason || '未指定原因'})`);
     return true;
   }
   return false;

@@ -541,6 +541,7 @@ export function parseRawModbusTCPFrame(rawFrame: Buffer): {
   batteryData?: any;
   error?: string;
   format?: 'binary' | 'ascii-hex';
+  frameType?: 'write-response' | 'status-response' | 'data-response' | 'other-read-response';
 } {
   try {
     // 检测并转换数据格式
@@ -573,7 +574,7 @@ export function parseRawModbusTCPFrame(rawFrame: Buffer): {
     // 如果是写单个寄存器响应（功能码0x06），直接返回成功
     if (functionCode === 0x06) {
       console.log('收到写单个寄存器响应，操作成功');
-      return { isValid: true, batteryData: { writeSuccess: true, unitId }, format };
+      return { isValid: true, batteryData: { writeSuccess: true, unitId }, format, frameType: 'write-response' };
     }
 
     // 获取字节计数
@@ -590,6 +591,22 @@ export function parseRawModbusTCPFrame(rawFrame: Buffer): {
 
     // 使用实际可用的字节数，而不是期望的字节数
     const actualDataBytes = Math.min(byteCount, availableDataBytes);
+
+    // 读1个寄存器的标准响应（11字节）属于状态帧，不应按完整电池数据帧处理。
+    if (actualDataBytes === 2) {
+      const statusValue = processedFrame.readUInt16BE(9);
+      const statusData = parseStatusRegister(statusValue);
+      const batteryData = {
+        unitId,
+        status: {
+          value: statusValue,
+          ...statusData
+        }
+      };
+
+      console.log(`状态寄存器响应帧: status=0x${statusValue.toString(16).toUpperCase().padStart(4, '0')}, measEnable=${statusData.measEnable ? 1 : 0}, testDone=${statusData.testDone ? 1 : 0}`);
+      return { isValid: true, batteryData, format, frameType: 'status-response' };
+    }
 
     // 解析寄存器值
     const values: number[] = [];
@@ -609,7 +626,8 @@ export function parseRawModbusTCPFrame(rawFrame: Buffer): {
       batteryData.unitId = unitId; // 添加Modbus设备地址
     }
 
-    return { isValid: true, batteryData, format };
+    const frameType = actualDataBytes >= 26 ? 'data-response' : 'other-read-response';
+    return { isValid: true, batteryData, format, frameType };
 
   } catch (error) {
     return { isValid: false, error: `解析异常: ${error}`, format: 'binary' };

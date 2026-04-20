@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   Box,
   Paper,
@@ -79,8 +79,9 @@ interface PingSubnetResult {
 
 
 const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
-  const F2_COOLDOWN_SECONDS = 30;
-  const F2_TEST_SECONDS = 30;
+  const DEVICE_UNIT_MIN = 1;
+  const DEVICE_UNIT_MAX = 128;
+  const DEVICE_UNIT_TOTAL = DEVICE_UNIT_MAX - DEVICE_UNIT_MIN + 1;
   const { clearBatteryData } = useBatteryData();
   const { isConnected, socket, clients } = useSocket();
   // const [filteredData, setFilteredData] = useState<any[]>([]);
@@ -160,9 +161,8 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
     activeF1Mode: null,
     testStatus: 'idle'
   });
-  const prevF2CooldownTimeRef = useRef<number>(0);
-  const [f2TestingTimeLeft, setF2TestingTimeLeft] = useState<number>(0);
-  const [isF2ReadResultLocked, setIsF2ReadResultLocked] = useState<boolean>(false);
+  const [, setF2TestingTimeLeft] = useState<number>(0);
+  const [f2MeasEnableValue, setF2MeasEnableValue] = useState<0 | 1 | null>(null);
   const [f2TestDoneValue, setF2TestDoneValue] = useState<0 | 1 | null>(null);
 
   // 设备在线状态（扫描后填充）
@@ -170,7 +170,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
 
   // 扫描状态
   const [isScanning, setIsScanning] = useState(false);
-  const [scanProgress, setScanProgress] = useState({ current: 0, total: 24 });
+  const [scanProgress, setScanProgress] = useState({ current: 0, total: DEVICE_UNIT_TOTAL });
 
   // 扫描在线设备处理函数
   const handleScanOnlineDevices = useCallback(async () => {
@@ -182,7 +182,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
       return;
     }
     setIsScanning(true);
-    setScanProgress({ current: 0, total: 24 });
+    setScanProgress({ current: 0, total: DEVICE_UNIT_TOTAL });
     setOnlineDevices([]);
     setSelectedDevices([]);
     try {
@@ -239,32 +239,42 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
   // 监听后端测试状态变更
   useEffect(() => {
     if (!socket) return;
-    const handleTestStateChange = (payload: { state: string, connectionId?: string, message?: string, testType?: string, cooldownSeconds?: number }) => {
+    const handleTestStateChange = (payload: {
+      state: string,
+      connectionId?: string,
+      message?: string,
+      testType?: string,
+      measEnable?: boolean | number,
+      testDone?: boolean | number,
+      statusRegister?: number
+    }) => {
       console.log("Test State Change:", payload);
 
+      const toBit = (value: boolean | number | undefined): 0 | 1 | null => {
+        if (value === undefined || value === null) return null;
+        if (typeof value === 'boolean') return value ? 1 : 0;
+        return Number(value) === 1 ? 1 : 0;
+      };
+
+      const measEnableBit = toBit(payload.measEnable);
+      const testDoneBitFromField = toBit(payload.testDone);
+
+      if (payload.testType === 'F2') {
+        if (measEnableBit !== null) {
+          setF2MeasEnableValue(measEnableBit);
+        }
+        if (testDoneBitFromField !== null) {
+          setF2TestDoneValue(testDoneBitFromField);
+        }
+      }
+
       const testDoneMatch = payload.message?.match(/test[_\s-]*done\s*=\s*([01])/i);
-      if (testDoneMatch) {
+      if (testDoneBitFromField === null && testDoneMatch) {
         setF2TestDoneValue(testDoneMatch[1] === '1' ? 1 : 0);
       }
 
       if (payload.message) {
-        const shouldHoldReadResult = isF2ReadResultLocked && testingState.isF2Testing && testingState.f2CooldownTime > 0;
-        // 冷却期内锁定“数据读取结束”文案，避免被 testStateChange 的过程消息覆盖。
-        if (!shouldHoldReadResult) {
-          setLastCommandResult(payload.message);
-        }
-      }
-
-      if (payload.testType === 'F2' && payload.state === 'TESTING' && (payload.cooldownSeconds ?? 0) > 0) {
-        // 后端在首次检测到 TEST_DONE=1 时下发 cooldownSeconds，前端立即进入冷却倒计时。
-        setF2TestingTimeLeft(0);
-        setF2TestDoneValue(1);
-        setLastCommandResult('正在获取数据');
-        setTestingState(prev => ({
-          ...prev,
-          isF2Testing: true,
-          f2CooldownTime: prev.f2CooldownTime > 0 ? prev.f2CooldownTime : (payload.cooldownSeconds || 0)
-        }));
+        setLastCommandResult(payload.message);
       }
 
       if (payload.state === 'COMM_ERROR') {
@@ -283,8 +293,16 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
           testStatus: 'idle',
           errorConnectionId: undefined,
           // Only reset if explicitly IDLE, RECOVERY_COMPLETE might be transient before TESTING
-          isF1Testing: payload.state === 'IDLE' ? false : prev.isF1Testing
+          isF1Testing: payload.state === 'IDLE' ? false : prev.isF1Testing,
+          // F2在超时/停止后会回到IDLE，必须释放按钮互锁，避免页面看起来“卡住”
+          isF2Testing: (payload.state === 'IDLE' && payload.testType === 'F2') ? false : prev.isF2Testing,
+          f2CooldownTime: (payload.state === 'IDLE' && payload.testType === 'F2') ? 0 : prev.f2CooldownTime
         }));
+        if (payload.state === 'IDLE' && payload.testType === 'F2') {
+          setF2TestingTimeLeft(0);
+          setF2MeasEnableValue(null);
+          setF2TestDoneValue(null);
+        }
         if (payload.state === 'RECOVERY_COMPLETE') {
           setLastCommandResult(`设备 ${payload.connectionId} 通讯已恢复，准备就绪`);
         }
@@ -312,7 +330,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
     return () => {
       socket.off('testStateChange', handleTestStateChange);
     }
-  }, [socket, isF2ReadResultLocked, testingState.isF2Testing, testingState.f2CooldownTime]);
+  }, [socket]);
 
 
   /*
@@ -321,54 +339,6 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
      console.warn("Manual interrupt monitor deprecated. System handles recovery automatically.");
   };
   */
-
-
-  // F2冷却时间倒计时 - 修复2秒一跳的问题
-  useEffect(() => {
-    if (testingState.f2CooldownTime > 0) {
-      const timer = setTimeout(() => {
-        setTestingState(prev => ({
-          ...prev,
-          f2CooldownTime: prev.f2CooldownTime - 1
-        }));
-      }, 1000);
-
-      return () => clearTimeout(timer);
-    }
-  }, [testingState.f2CooldownTime]);
-
-  // F2快速测试阶段倒计时（25秒）
-  useEffect(() => {
-    if (testingState.isF2Testing && testingState.f2CooldownTime === 0 && f2TestingTimeLeft > 0) {
-      const timer = setTimeout(() => {
-        setF2TestingTimeLeft(prev => Math.max(0, prev - 1));
-      }, 1000);
-
-      return () => clearTimeout(timer);
-    }
-  }, [testingState.isF2Testing, testingState.f2CooldownTime, f2TestingTimeLeft]);
-
-  // 动态省略号动画状态（不直接渲染，忽略局部变量）
-  const [, setDotAnimation] = useState('');
-
-  // 省略号动画效果
-  useEffect(() => {
-    if (testingState.f2CooldownTime > 0) {
-      const animationTimer = setInterval(() => {
-        setDotAnimation(prev => {
-          if (prev === '') return '.';
-          if (prev === '.') return '..';
-          if (prev === '..') return '...';
-          return '';
-        });
-      }, 500); // 每500ms更新一次省略号
-
-      return () => clearInterval(animationTimer);
-    } else {
-      setDotAnimation('');
-    }
-  }, [testingState.f2CooldownTime]);
-
 
   // Modbus连接管理状态
   const [modbusConnections, setModbusConnections] = useState<ModbusConnection[]>([]);
@@ -459,34 +429,6 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
       }
     });
   }, []);
-
-  // 当F2冷却时间结束时重置寄存器状态并清除F2测试状态
-  useEffect(() => {
-    const prevCooldownTime = prevF2CooldownTimeRef.current;
-    const currentCooldownTime = testingState.f2CooldownTime;
-    prevF2CooldownTimeRef.current = currentCooldownTime;
-
-    // 仅在冷却倒计时由正数降到0时释放F2状态，避免启动F2时被立即复位。
-    const cooldownJustEnded = prevCooldownTime > 0 && currentCooldownTime <= 0;
-    if (cooldownJustEnded && testingState.isF2Testing) {
-      console.log('F2冷却时间结束，重置寄存器状态并释放F1按钮');
-      resetRegisterStatus();
-      setLastCommandResult('冷却保护结束，可以进行新的测试');
-      setF2TestingTimeLeft(0);
-      setIsF2ReadResultLocked(false);
-      setF2TestDoneValue(null);
-
-      // 清除F2测试状态，释放F1按钮
-      setTestingState(prev => ({
-        ...prev,
-        isF2Testing: false,
-        testingDevices: new Set(),
-        f2CooldownTime: 0
-      }));
-    }
-  }, [testingState.f2CooldownTime, testingState.isF2Testing, resetRegisterStatus]);
-
-
 
   // 监听实时电池数据更新
   useEffect(() => {
@@ -701,14 +643,14 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
       if (data?.success) {
         setSuccess(data.message || 'F2快速测试已启动');
         setLastCommandResult('命令写入成功，正在进行F2快速测试');
-        setF2TestingTimeLeft(F2_TEST_SECONDS);
-        setIsF2ReadResultLocked(false);
+        setF2TestingTimeLeft(0);
+        setF2MeasEnableValue(0);
         setF2TestDoneValue(0);
       } else {
         setError(data?.message || 'F2快速测试启动失败');
         setLastCommandResult(`${data?.message || 'F2快速测试启动失败'}`);
         setF2TestingTimeLeft(0);
-        setIsF2ReadResultLocked(false);
+        setF2MeasEnableValue(null);
         setF2TestDoneValue(null);
         setTestingState(prev => ({ ...prev, isF2Testing: false, f2CooldownTime: 0 }));
       }
@@ -723,7 +665,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
 
     // 扫描进度与扫描完成事件
     socket.on('deviceScanProgress', (data: any) => {
-      setScanProgress({ current: data.progress || data.unitId || 0, total: data.total || 24 });
+      setScanProgress({ current: data.progress || data.unitId || 0, total: data.total || DEVICE_UNIT_TOTAL });
     });
     socket.on('deviceScanComplete', (data: any) => {
       console.log('扫描完成事件:', data);
@@ -732,7 +674,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
       // 扫描完成后自动选中所有在线设备
       setSelectedDevices(devices.map(String));
       setIsScanning(false);
-      setScanProgress({ current: 24, total: 24 });
+      setScanProgress({ current: data.totalScanned || DEVICE_UNIT_TOTAL, total: data.totalScanned || DEVICE_UNIT_TOTAL });
     });
 
     // Modbus相关事件监听
@@ -822,9 +764,8 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
       console.log('测试完成:', data);
 
       if (data.testType === 'F2') {
-        setLastCommandResult('数据读取结束，共六十条');
+        setLastCommandResult('数据读取结束，共六十条，等待冷却结束');
         setF2TestingTimeLeft(0);
-        setIsF2ReadResultLocked(true);
       } else {
         setSuccess(`设备 ${data.deviceId} 的 ${data.testType} 测试完成`);
       }
@@ -849,14 +790,10 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
           newTestingDevices.delete(data.deviceId);
           return {
             ...prev,
-            testingDevices: newTestingDevices,
-            // 即使所有设备都完成了，也不要清除 isF2Testing 状态，
-            // 冷却从首次 TEST_DONE=1 开始计时，若未收到该事件则回退为30秒。
-            isF2Testing: true,
-            f2CooldownTime: prev.f2CooldownTime > 0 ? prev.f2CooldownTime : F2_COOLDOWN_SECONDS
+            testingDevices: newTestingDevices
           };
         });
-        console.log(`已清除设备 ${data.deviceId} 的F2测试状态，开始30秒冷却`);
+        console.log(`已清除设备 ${data.deviceId} 的F2测试状态`);
       }
     });
 
@@ -1053,8 +990,8 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
   const parsedStatusDisplay = {
     measEnable: (displayStatusRawValue & 0x0001) !== 0,
     measRunning: (displayStatusRawValue & 0x0002) !== 0,
-    // 协议文档未定义独立的 COOLDOWN_LOCKED 位，前端使用本地倒计时表示冷却期
-    cooldownLocked: testingState.f2CooldownTime > 0,
+    // 协议文档未定义独立的 COOLDOWN_LOCKED 位，改为根据F2运行态+MEAS_ENABLE近似展示
+    cooldownLocked: testingState.isF2Testing && f2MeasEnableValue === 1,
     alarmCell1Ov: (displayStatusRawValue & 0x0004) !== 0,
     alarmCell1Uv: (displayStatusRawValue & 0x0008) !== 0,
     commTimeout: (displayStatusRawValue & 0x0010) !== 0,
@@ -1568,7 +1505,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
           socket.emit('stopTest', { connectionId: connectionIdToStop });
           setSuccess('停止F2测试命令已发送');
           setF2TestingTimeLeft(0);
-          setIsF2ReadResultLocked(false);
+          setF2MeasEnableValue(null);
           setF2TestDoneValue(null);
           setTestingState(prev => ({ ...prev, isF2Testing: false, f2CooldownTime: 0 }));
         }
@@ -1593,7 +1530,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
 
       setTestingState(prev => ({ ...prev, isF2Testing: true }));
       setF2TestingTimeLeft(0);
-      setIsF2ReadResultLocked(false);
+      setF2MeasEnableValue(0);
       setF2TestDoneValue(0);
       setLastCommandResult('正在发送F2启动命令');
 
@@ -1933,7 +1870,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
                   onClick={handleScanOnlineDevices}
                   disabled={isScanning || !isConnected || clients.length === 0 || testingState.isF1Testing || testingState.isF2Testing}
                 >
-                  {isScanning ? "扫描中..." : "扫描在线设备 (1-24)"}
+                  {isScanning ? "扫描中..." : `扫描在线设备 (${DEVICE_UNIT_MIN}-${DEVICE_UNIT_MAX})`}
                 </Button>
 
                 {isScanning && (
@@ -1960,7 +1897,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
                   在线设备指示 (绿色: 在线 / 已选中, 灰色: 离线 / 未选中) - 点击可更改选中状态
                 </Typography>
                 <Grid container spacing={0.5}>
-                  {Array.from({ length: 24 }, (_, i) => i + 1).map((id) => {
+                  {Array.from({ length: DEVICE_UNIT_TOTAL }, (_, i) => DEVICE_UNIT_MIN + i).map((id) => {
                     const isOnline = onlineDevices.includes(id);
                     const isSelected = selectedDevices.includes(id.toString());
 
@@ -2006,7 +1943,6 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
                     testingState.testStatus === 'error' ||
                     !isConnected ||
                     testingState.isF2Testing ||
-                    testingState.f2CooldownTime > 0 ||
                     (testingState.isF1Testing && testingState.activeF1Mode === 'static')
                   }
                 >
@@ -2030,11 +1966,10 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
                   disabled={
                     !isConnected ||
                     testingState.isF1Testing ||
-                    testingState.isF2Testing ||
-                    testingState.f2CooldownTime > 0
+                    testingState.isF2Testing
                   }
                 >
-                  {testingState.isF2Testing ? `停止快速测试 ${testingState.f2CooldownTime > 0 ? `(${testingState.f2CooldownTime}s)` : ''}` : "快速测试"}
+                  {testingState.isF2Testing ? '停止快速测试' : '快速测试'}
                 </Button>
 
                 <FormControl size="small" sx={{ minWidth: 80 }}>
@@ -2047,7 +1982,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
                     onChange={(e) => setFastTestDeviceId(Number(e.target.value))}
                     disabled={testingState.isF2Testing}
                   >
-                    {(onlineDevices.length > 0 ? onlineDevices : Array.from({ length: 24 }, (_, i) => i + 1)).map((n) => (
+                    {(onlineDevices.length > 0 ? onlineDevices : Array.from({ length: DEVICE_UNIT_TOTAL }, (_, i) => DEVICE_UNIT_MIN + i)).map((n) => (
                       <MenuItem key={n} value={n}>
                         {n} {onlineDevices.length > 0 ? '(在线)' : ''}
                       </MenuItem>
@@ -2084,43 +2019,14 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
                     {lastCommandResult}
                   </Typography>
                 </Paper>
-                {testingState.isF2Testing && testingState.f2CooldownTime === 0 && f2TestingTimeLeft > 0 && (
+                {testingState.isF2Testing && (
                   <Box sx={{ mt: 2 }}>
-                    <Typography variant="body2" sx={{ mb: 1 }}>
-                      正在进行快速测试（剩余{f2TestingTimeLeft}s）
+                    <Typography variant="body2" sx={{ mb: 0.5 }}>
+                      Bit0 MEAS_ENABLE = {f2MeasEnableValue ?? '-'}
                     </Typography>
                     <Typography variant="body2" sx={{ mb: 1 }}>
-                      TEST_DONE = {f2TestDoneValue ?? 0}
+                      Bit5 TEST_DONE = {f2TestDoneValue ?? '-'}
                     </Typography>
-                    <Box sx={{ display: 'flex', alignItems: 'center' }}>
-                      <Box sx={{ width: '100%', mr: 1 }}>
-                        <LinearProgress
-                          variant="determinate"
-                          value={((F2_TEST_SECONDS - f2TestingTimeLeft) / F2_TEST_SECONDS) * 100}
-                        />
-                      </Box>
-                      <Box sx={{ minWidth: 40 }}>
-                        <Typography variant="body2" color="text.secondary">{`${F2_TEST_SECONDS - f2TestingTimeLeft}/${F2_TEST_SECONDS}`}</Typography>
-                      </Box>
-                    </Box>
-                  </Box>
-                )}
-                {testingState.isF2Testing && testingState.f2CooldownTime > 0 && (
-                  <Box sx={{ mt: 2 }}>
-                    <Typography variant="body2" sx={{ mb: 1 }}>
-                      设备冷却保护中（{testingState.f2CooldownTime}s）
-                    </Typography>
-                    <Box sx={{ display: 'flex', alignItems: 'center' }}>
-                      <Box sx={{ width: '100%', mr: 1 }}>
-                        <LinearProgress
-                          variant="determinate"
-                          value={((F2_COOLDOWN_SECONDS - testingState.f2CooldownTime) / F2_COOLDOWN_SECONDS) * 100}
-                        />
-                      </Box>
-                      <Box sx={{ minWidth: 40 }}>
-                        <Typography variant="body2" color="text.secondary">{`${F2_COOLDOWN_SECONDS - testingState.f2CooldownTime}/${F2_COOLDOWN_SECONDS}`}</Typography>
-                      </Box>
-                    </Box>
                   </Box>
                 )}
               </Box>

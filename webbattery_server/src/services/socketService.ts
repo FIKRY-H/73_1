@@ -33,6 +33,9 @@ import {
 } from './pollingService';
 import { COMMAND_MAP, STATUS_BITS } from '../utils/modbusFrameUtils';
 
+const DEVICE_UNIT_MIN = 1;
+const DEVICE_UNIT_MAX = 128;
+
 // Store connected clients
 const connectedClients = new Map<string, ClientConnection>();
 
@@ -517,7 +520,17 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
         const connections = getModbusConnections();
         const connection = connections.find(c => c.id === connectionId);
         // 优先使用传入的targetUnitId，其次使用连接的deviceId，最后默认为1
-        const unitId = targetUnitId || connection?.deviceId || 1;
+        const rawUnitId = targetUnitId ?? connection?.deviceId ?? DEVICE_UNIT_MIN;
+        const unitId = Number(rawUnitId);
+        if (!Number.isInteger(unitId) || unitId < DEVICE_UNIT_MIN || unitId > DEVICE_UNIT_MAX) {
+          socket.emit('startF2FastTestResponse', {
+            success: false,
+            connectionId,
+            message: `目标设备地址必须是 ${DEVICE_UNIT_MIN}-${DEVICE_UNIT_MAX} 的整数`,
+            timestamp: new Date().toISOString()
+          });
+          return;
+        }
 
         console.log(`启动F2快速测试: ${connectionId}, UnitID=${unitId}`);
 
@@ -565,7 +578,11 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
 
         // 停止所有轮询（包括F1和F2）
         const { stopPolling } = await import('./pollingService');
-        const pollingStopResult = stopPolling(connectionId);
+        const pollingStopResult = stopPolling(connectionId, {
+          sendF2StopCommand: true,
+          f2StopValue: 0x0002,
+          reason: 'WebSocket stopTest 手动停止'
+        });
         if (pollingStopResult) {
           console.log(`轮询已停止 ${connectionId}`);
         }
@@ -822,7 +839,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
           console.log('周期测试模式且DATA_READY位为0，跳过电池数据转发');
         }
       } else {
-        console.log('⚠️ 状态寄存器未定义，跳过电池数据转发');
+        console.log('状态寄存器未定义，跳过电池数据转发');
       }
     });
 
@@ -968,6 +985,47 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
         console.log('收到写寄存器响应: ' + data.data.toString('hex'));
         // 注意：现在不再等待写命令响应来启动F1轮询，轮询已在写命令发送后立即启动
 
+        return;
+      }
+
+      // 读1个寄存器(11字节)的状态响应帧单独处理，不走电池数据保存流程。
+      if (parseResult.frameType === 'status-response') {
+        const unitId = batteryData.unitId || connection.deviceId || 1;
+        const status = batteryData.status as any;
+        const statusRegisterValue = typeof status === 'number'
+          ? status
+          : (status?.rawValue ?? status?.value);
+
+        if (typeof statusRegisterValue === 'number') {
+          const statusMac = `${connection.host}_${unitId.toString().padStart(2, '0')}`;
+
+          io.emit('registerStatusUpdate', {
+            deviceNumber: unitId,
+            mac: statusMac,
+            host: connection.host,
+            unitId,
+            deviceAddress: unitId,
+            statusRegister: statusRegisterValue,
+            statusBits: {
+              measEnable: !!status?.measEnable,
+              testDone: !!status?.testDone,
+              rawValue: statusRegisterValue,
+              binaryString: statusRegisterValue.toString(2).padStart(16, '0')
+            },
+            timestamp: new Date().toISOString(),
+            isRegisterUpdate: true,
+            responseType: 'status-only'
+          });
+
+          console.log(`状态寄存器响应已处理: conn=${data.connectionId}, unit=${unitId}, status=0x${statusRegisterValue.toString(16).toUpperCase().padStart(4, '0')}`);
+        }
+
+        return;
+      }
+
+      // 非状态帧且非完整数据帧，直接忽略，避免误判为协议异常。
+      if (parseResult.frameType === 'other-read-response') {
+        console.log(`忽略非完整数据读响应帧: ${data.data.toString('hex')}`);
         return;
       }
 

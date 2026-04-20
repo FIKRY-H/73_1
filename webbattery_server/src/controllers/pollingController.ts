@@ -20,6 +20,9 @@ import {
 import { getClientConnections } from '../services/modbusService';
 import { getSocketIOInstance } from '../index';
 
+const DEVICE_UNIT_MIN = 1;
+const DEVICE_UNIT_MAX = 128;
+
 // 检查是否应该启用轮询
 const shouldEnablePolling = (): boolean => {
   const connections = getClientConnections();
@@ -228,7 +231,13 @@ export const startF2FastTestController = async (req: Request, res: Response) => 
     
     // 使用F2快速轮询功能（包含写命令+快速读取）
     // 如果未指定 targetUnitId，默认为 1
-    const unitId = targetUnitId ? Number(targetUnitId) : 1;
+    const unitId = targetUnitId ? Number(targetUnitId) : DEVICE_UNIT_MIN;
+    if (!Number.isInteger(unitId) || unitId < DEVICE_UNIT_MIN || unitId > DEVICE_UNIT_MAX) {
+      return res.status(400).json({
+        success: false,
+        message: `目标设备地址必须是 ${DEVICE_UNIT_MIN}-${DEVICE_UNIT_MAX} 的整数`
+      });
+    }
     const success = await startF2FastPolling(deviceId, unitId);
     
     if (success) {
@@ -584,7 +593,13 @@ export const startF2FastPollingController = async (req: Request, res: Response) 
     }
     
     // 传递 targetUnitId (默认为1)
-    const unitId = targetUnitId ? parseInt(targetUnitId, 10) : 1;
+    const unitId = targetUnitId ? parseInt(targetUnitId, 10) : DEVICE_UNIT_MIN;
+    if (!Number.isInteger(unitId) || unitId < DEVICE_UNIT_MIN || unitId > DEVICE_UNIT_MAX) {
+      return res.status(400).json({
+        success: false,
+        message: `目标设备地址必须是 ${DEVICE_UNIT_MIN}-${DEVICE_UNIT_MAX} 的整数`
+      });
+    }
     console.log(`收到F2快速轮询请求: DeviceID=${deviceId}, TargetUnitID=${targetUnitId}, ParsedUnitID=${unitId}`);
     
     const success = await startF2FastPolling(deviceId, unitId);
@@ -796,7 +811,7 @@ export const startBatchPollingController = async (req: Request, res: Response) =
 
 // 恢复缓冲数据控制
 
-// 设备发现扫描 (扫描 1-24)
+// 设备发现扫描 (扫描 1-128)
 export const scanDevicesController = async (req: Request, res: Response) => {
   try {
     const { deviceId } = req.body;

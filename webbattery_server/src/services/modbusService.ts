@@ -723,7 +723,12 @@ export const readHoldingRegistersWithFixedTxId = async (connectionId: string, tr
   frame.writeUInt16BE(address, offset); offset += 2;
   frame.writeUInt16BE(quantity, offset); offset += 2;
 
+  const frameHex = frame.toString('hex').toUpperCase().match(/.{1,2}/g)?.join(' ') || frame.toString('hex').toUpperCase();
+  const expectedResponseLengthField = 3 + quantity * 2; // UnitID + FC + ByteCount + Data
+  const expectedResponseBytes = 6 + expectedResponseLengthField;
   console.log(`读保持寄存器(固定TxID) ${connectionId}: TxID=0x${transactionId.toString(16).padStart(4, '0')}, UnitID=${unitId}, 地址=0x${address.toString(16).padStart(4, '0')}, 数量=${quantity}`);
+  console.log(`发送读命令帧 ${connectionId}: ${frameHex}`);
+  console.log(`协议长度预期 ${connectionId}: FC03读取${quantity}寄存器，请求=12字节(Length=6)，响应=${expectedResponseBytes}字节(Length=${expectedResponseLengthField})`);
 
   // 发送命令并等待响应
   return enqueueCommand(connectionId, () => {
@@ -778,7 +783,7 @@ export const readHoldingRegistersWithFixedTxId = async (connectionId: string, tr
         if (!isResolved) {
           isResolved = true;
           cleanup();
-          // console.log(`⚠️ 读响应超时 ${connectionId}: TxID=0x${transactionId.toString(16)}`);
+          // console.log(`读响应超时 ${connectionId}: TxID=0x${transactionId.toString(16)}`);
           resolve(null);
         }
       }, 250);

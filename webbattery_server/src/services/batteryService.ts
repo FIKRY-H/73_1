@@ -812,15 +812,22 @@ export const getDistinctDeviceAddressesByIp = async (ip: string): Promise<string
   const db = getDatabase();
   try {
     const rows = await db.all(
-      `SELECT DISTINCT device_address FROM battery_data WHERE ip_prefix = ? AND device_address IS NOT NULL ORDER BY device_address ASC`,
+      `SELECT DISTINCT device_address
+       FROM battery_data
+       WHERE ip_prefix = ?
+         AND device_address IS NOT NULL
+         AND TRIM(device_address) <> ''
+       ORDER BY CAST(device_address AS INTEGER) ASC, device_address ASC`,
       ip
     );
-    const padded = rows
+    const normalized = rows
       .map((r: any) => String(r.device_address || '').trim())
       .filter(Boolean)
-      .map((s: string) => s.padStart(2, '0'));
-    // 去重后返回规范化的两位设备地址
-    return Array.from(new Set(padded));
+      .map((s: string) => Number(s))
+      .filter((n: number) => Number.isFinite(n) && n >= 1 && n <= 128)
+      .map((n: number) => String(n));
+    // 去重后返回规范化设备地址（1-128）
+    return Array.from(new Set(normalized));
   } catch (error) {
     console.error('Error getting distinct device addresses by IP:', error);
     throw error;
@@ -1148,7 +1155,7 @@ export const exportDataToExcelByIp = async (
     workbook.created = new Date();
     workbook.modified = new Date();
 
-    // 定义列头
+    // 定义列头：与数据库字段保持一致，完整导出 Bat1/Bat3/Bat4 阻抗数据
     const columns = [
       { header: 'IP地址', key: 'ip', width: 15 },
       { header: '设备地址', key: 'addr', width: 10 },
@@ -1156,8 +1163,21 @@ export const exportDataToExcelByIp = async (
       { header: '电池电压(mV)', key: 'voltage', width: 15 },
       { header: 'Bat1 R1(μΩ)', key: 'r1', width: 15 },
       { header: 'Bat1 R2(μΩ)', key: 'r2', width: 15 },
-      { header: 'Bat1 R3(μΩ)', key: 'r3', width: 15 }
+      { header: 'Bat1 R3(μΩ)', key: 'r3', width: 15 },
+      { header: 'Bat3 R1(μΩ)', key: 'bat3_r1', width: 15 },
+      { header: 'Bat3 R2(μΩ)', key: 'bat3_r2', width: 15 },
+      { header: 'Bat3 R3(μΩ)', key: 'bat3_r3', width: 15 },
+      { header: 'Bat4 R1(μΩ)', key: 'bat4_r1', width: 15 },
+      { header: 'Bat4 R2(μΩ)', key: 'bat4_r2', width: 15 },
+      { header: 'Bat4 R3(μΩ)', key: 'bat4_r3', width: 15 }
     ];
+
+    // 兼容两种字段形态：{ actual } 对象或直接数值
+    const pickActual = (value: any): number | string => {
+      if (value === null || value === undefined) return '';
+      if (typeof value === 'object' && value.actual !== undefined && value.actual !== null) return value.actual;
+      return value;
+    };
 
     // 分组数据
     // F1: CyclicTest (0xAA)
@@ -1210,7 +1230,13 @@ export const exportDataToExcelByIp = async (
           voltage: row.voltage,
           r1: row.r1?.actual || row.rOhm || '',
           r2: row.r2?.actual || row.rSei || '',
-          r3: row.r3?.actual || row.rCt || ''
+          r3: row.r3?.actual || row.rCt || '',
+          bat3_r1: pickActual((row as any).bat3_r1),
+          bat3_r2: pickActual((row as any).bat3_r2),
+          bat3_r3: pickActual((row as any).bat3_r3),
+          bat4_r1: pickActual((row as any).bat4_r1),
+          bat4_r2: pickActual((row as any).bat4_r2),
+          bat4_r3: pickActual((row as any).bat4_r3)
         });
       });
     };
