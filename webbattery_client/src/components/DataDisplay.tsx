@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useReducer } from 'react';
 import {
   Box,
   Paper,
@@ -12,11 +12,7 @@ import {
   Alert,
   Button,
   Tooltip,
-
-  FormControlLabel,
-  Divider,
   Chip,
-  Checkbox,
   TextField,
   Dialog,
   DialogTitle,
@@ -25,11 +21,7 @@ import {
   Grid,
   LinearProgress,
   Tabs,
-  Tab,
-  FormControl,
-  InputLabel,
-  Select,
-  MenuItem
+  Tab
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -38,6 +30,7 @@ import {
 import { useBatteryData } from '../contexts/BatteryDataContext';
 import { useSocket } from '../contexts/SocketContext';
 import { FrameType } from '../types/batteryTypes';
+import DeviceCard, { cardReducer } from './DeviceCard';
 
 interface DataDisplayProps {
   displayMode: FrameType;
@@ -80,7 +73,7 @@ interface PingSubnetResult {
 
 const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
   const DEVICE_UNIT_MIN = 1;
-  const DEVICE_UNIT_MAX = 128;
+  const DEVICE_UNIT_MAX = 12;
   const DEVICE_UNIT_TOTAL = DEVICE_UNIT_MAX - DEVICE_UNIT_MIN + 1;
   const { clearBatteryData } = useBatteryData();
   const { isConnected, socket, clients } = useSocket();
@@ -89,24 +82,6 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
   const [realtimeData, setRealtimeData] = useState<any[]>([]);
   const [selectedIp, setSelectedIp] = useState<string>('');
   const [selectedDeviceAddr, setSelectedDeviceAddr] = useState<string>('');
-  const [, setRegisterStatus] = useState<any>({
-    statusRegister: 0,
-    controlRegisterA: 0,
-    controlRegisterB: 0,
-    statusBits: {
-      measEnable: false,
-      measRunning: false,
-      alarmCell1Ov: false,
-      alarmCell1Uv: false,
-      commTimeout: false,
-      testDone: false,
-      forceStopped: false,
-      dataReady: false,
-      commError: false,
-      rawValue: 0,
-      binaryString: '0000000000000000'
-    }
-  });
   // 设备状态寄存器缓存，键为 "IP_设备号(两位)"
   const [registerStatusByDevice, setRegisterStatusByDevice] = useState<Record<string, {
     statusRegister: number;
@@ -117,25 +92,6 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
     timestamp?: string;
   }>>({});
 
-  // 基于当前选择的IP与设备号，从缓存中获取对应设备的状态寄存器原始值
-  const selectedKey = (selectedIp && selectedDeviceAddr)
-    ? `${selectedIp}_${String(selectedDeviceAddr).padStart(2, '0')}`
-    : '';
-  const selectedReg = selectedKey ? registerStatusByDevice[selectedKey] : undefined;
-  // 状态原始值展示改为使用 displayStatusRawValue，下方已定义
-  // 旧的 parsedStatus 计算未使用，已移除，改用下方 displayStatusRawValue/parsedStatusDisplay
-
-
-
-  // 测试控制状态 - 简化的互锁逻辑
-  const [selectedDevices, setSelectedDevices] = useState<string[]>([]);
-  const [lastCommandResult, setLastCommandResult] = useState<string>('');
-  const [loopIntervalTime, setLoopIntervalTime] = useState<number>(3); // 周期测试时间（秒），范围3-60
-  // 输入框字符串态，允许清空
-  const [loopIntervalInput, setLoopIntervalInput] = useState<string>('3');
-  const [fastTestDeviceId, setFastTestDeviceId] = useState<number>(1); // F2快速测试目标设备号
-
-
   /*
   // 中断监控状态 - 已废弃
   const [interruptMonitoring, setInterruptMonitoring] = useState<{
@@ -144,26 +100,16 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
   }>({ active: false, devices: new Set() });
   */
 
-  // 简化的测试状态管理 - 只用一个状态控制所有互锁
+  // 简化的测试状态管理 - F1已独立到卡片，仅保留F2全局状态
   const [testingState, setTestingState] = useState<{
-    isF1Testing: boolean;
     isF2Testing: boolean;
     f2CooldownTime: number;
-    testingDevices: Set<string>;
-    activeF1Mode: 'cyclic' | 'static' | null;
-    testStatus: 'idle' | 'testing' | 'error'; // 新增状态机状态
-    errorConnectionId?: string; // 记录出错的连接
   }>({
-    isF1Testing: false,
     isF2Testing: false,
-    f2CooldownTime: 0,
-    testingDevices: new Set(),
-    activeF1Mode: null,
-    testStatus: 'idle'
+    f2CooldownTime: 0
   });
-  const [, setF2TestingTimeLeft] = useState<number>(0);
-  const [f2MeasEnableValue, setF2MeasEnableValue] = useState<0 | 1 | null>(null);
-  const [f2TestDoneValue, setF2TestDoneValue] = useState<0 | 1 | null>(null);
+  const [cardStates, dispatchCardAction] = useReducer(cardReducer, {});
+  const [rawTestResults, setRawTestResults] = useState<Record<string, any[]>>({});
 
   // 设备在线状态（扫描后填充）
   const [onlineDevices, setOnlineDevices] = useState<number[]>([]);
@@ -184,7 +130,6 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
     setIsScanning(true);
     setScanProgress({ current: 0, total: DEVICE_UNIT_TOTAL });
     setOnlineDevices([]);
-    setSelectedDevices([]);
     try {
       console.log(`[Scan] 向后端发送扫描请求: deviceId=${firstConnected.id}`);
       const response = await fetch('/api/polling/devices/scan', {
@@ -197,7 +142,6 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
 
       if (result.success) {
         setSuccess(`扫描完成，发现 ${result.data?.onlineDevices?.length || 0} 个在线设备`);
-        setLastCommandResult(`✅ 扫描完成: 发现 ${result.data?.onlineDevices?.length || 0} 个在线设备`);
       } else {
         setError(`扫描失败: ${result.message}`);
       }
@@ -209,149 +153,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
     }
   }, [isScanning, clients]);
 
-  // 检查当前选中的设备是否离线 (>12s无数据)
-  const [isSelectedDeviceOffline, setIsSelectedDeviceOffline] = useState(false);
-
-  const getEffectiveLoopPeriodSeconds = useCallback(() => {
-    const raw = (loopIntervalInput ?? '').trim();
-    const value = raw === '' ? 3 : (loopIntervalTime || 3);
-    return Math.max(3, Math.min(60, value));
-  }, [loopIntervalInput, loopIntervalTime]);
-
-  useEffect(() => {
-    const checkOffline = () => {
-      const selectedDeviceNum = parseInt(String(selectedDeviceAddr || ''), 10);
-      const selectedInOnlineList = !isNaN(selectedDeviceNum) && onlineDevices.includes(selectedDeviceNum);
-      const hasAliveConnection = (clients || []).some(c => c.isConnected);
-
-      if (!selectedReg?.timestamp) {
-        // 有在线扫描结果或连接存活时，避免误报离线
-        setIsSelectedDeviceOffline(!(selectedInOnlineList || hasAliveConnection));
-        return;
-      }
-
-      const lastTime = new Date(selectedReg.timestamp).getTime();
-      const diff = Date.now() - lastTime;
-
-      // 动态超时阈值：F1周期可配置，F2固定高频，空闲态放宽
-      const timeoutMs = testingState.isF1Testing
-        ? Math.max(12000, getEffectiveLoopPeriodSeconds() * 1000 + 3000)
-        : testingState.isF2Testing
-          ? 12000
-          : 30000;
-
-      // 若扫描仍判定在线，则不提示离线；否则按时间戳判定
-      setIsSelectedDeviceOffline(!selectedInOnlineList && diff > timeoutMs);
-    };
-
-    checkOffline(); // Initial check
-    const timer = setInterval(checkOffline, 1000); // Periodic check
-    return () => clearInterval(timer);
-  }, [
-    selectedReg?.timestamp,
-    selectedDeviceAddr,
-    onlineDevices,
-    clients,
-    testingState.isF1Testing,
-    testingState.isF2Testing,
-    getEffectiveLoopPeriodSeconds
-  ]);
-
-  // 监听后端测试状态变更
-  useEffect(() => {
-    if (!socket) return;
-    const handleTestStateChange = (payload: {
-      state: string,
-      connectionId?: string,
-      message?: string,
-      testType?: string,
-      measEnable?: boolean | number,
-      testDone?: boolean | number,
-      statusRegister?: number
-    }) => {
-      console.log("Test State Change:", payload);
-
-      const toBit = (value: boolean | number | undefined): 0 | 1 | null => {
-        if (value === undefined || value === null) return null;
-        if (typeof value === 'boolean') return value ? 1 : 0;
-        return Number(value) === 1 ? 1 : 0;
-      };
-
-      const measEnableBit = toBit(payload.measEnable);
-      const testDoneBitFromField = toBit(payload.testDone);
-
-      if (payload.testType === 'F2') {
-        if (measEnableBit !== null) {
-          setF2MeasEnableValue(measEnableBit);
-        }
-        if (testDoneBitFromField !== null) {
-          setF2TestDoneValue(testDoneBitFromField);
-        }
-      }
-
-      const testDoneMatch = payload.message?.match(/test[_\s-]*done\s*=\s*([01])/i);
-      if (testDoneBitFromField === null && testDoneMatch) {
-        setF2TestDoneValue(testDoneMatch[1] === '1' ? 1 : 0);
-      }
-
-      if (payload.message) {
-        setLastCommandResult(payload.message);
-      }
-
-      if (payload.state === 'COMM_ERROR') {
-        setTestingState(prev => ({
-          ...prev,
-          testStatus: 'error',
-          errorConnectionId: payload.connectionId,
-          // 保持 isF1Testing = true，以便按钮显示为"测试中/停止"或显示错误状态，
-          // 用户反馈说"测试按钮没有恢复"，可能因为这里之前的逻辑把它设为 false 了
-          // isF1Testing: false // Don't disable testing mode, just mark as error
-        }));
-        setLastCommandResult(`设备 ${payload.connectionId} 通讯异常，正在尝试恢复...`);
-      } else if (payload.state === 'IDLE' || payload.state === 'RECOVERY_COMPLETE') {
-        setTestingState(prev => ({
-          ...prev,
-          testStatus: 'idle',
-          errorConnectionId: undefined,
-          // Only reset if explicitly IDLE, RECOVERY_COMPLETE might be transient before TESTING
-          isF1Testing: payload.state === 'IDLE' ? false : prev.isF1Testing,
-          // F2在超时/停止后会回到IDLE，必须释放按钮互锁，避免页面看起来“卡住”
-          isF2Testing: (payload.state === 'IDLE' && payload.testType === 'F2') ? false : prev.isF2Testing,
-          f2CooldownTime: (payload.state === 'IDLE' && payload.testType === 'F2') ? 0 : prev.f2CooldownTime
-        }));
-        if (payload.state === 'IDLE' && payload.testType === 'F2') {
-          setF2TestingTimeLeft(0);
-          setF2MeasEnableValue(null);
-          setF2TestDoneValue(null);
-        }
-        if (payload.state === 'RECOVERY_COMPLETE') {
-          setLastCommandResult(`设备 ${payload.connectionId} 通讯已恢复，准备就绪`);
-        }
-      } else if (payload.state === 'TESTING') {
-        // 接收到 TESTING 状态，恢复界面为正常测试中
-        setTestingState(prev => {
-          const isF1 = payload.testType === 'F1' || (!payload.testType && !prev.isF2Testing);
-          const isF2 = payload.testType === 'F2' || (!payload.testType && prev.isF2Testing);
-          return {
-            ...prev,
-            testStatus: 'testing',
-            isF1Testing: isF1 ? true : prev.isF1Testing,
-            isF2Testing: isF2 ? true : prev.isF2Testing,
-            activeF1Mode: isF1 ? (prev.activeF1Mode || 'cyclic') : prev.activeF1Mode,
-            errorConnectionId: undefined
-          };
-        });
-        if (!payload.message) {
-          setLastCommandResult(`设备 ${payload.connectionId} 处于测试中`);
-        }
-      }
-    };
-    socket.on('testStateChange', handleTestStateChange);
-
-    return () => {
-      socket.off('testStateChange', handleTestStateChange);
-    }
-  }, [socket]);
+  // 监听后端测试状态变更已移至下方 modbusConnections 声明之后，以解决 block-scoped variable 报错。
 
 
   /*
@@ -393,63 +195,124 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
   const [autoDiscoveryProgress, setAutoDiscoveryProgress] = useState<string>('');
   const [autoDiscoveryResults, setAutoDiscoveryResults] = useState<any>(null);
 
-  // 轮询功能相关状态
-  const [pollingStatus, setPollingStatus] = useState({
-    isPolling: false,
-    testType: null as string | null,
-    devices: [] as string[],
-    startTime: null as Date | null
-  });
+  // 监听后端测试状态变更
+  useEffect(() => {
+    if (!socket) return;
+    const handleTestStateChange = (payload: {
+      state: string,
+      connectionId?: string,
+      message?: string,
+      testType?: string,
+      measEnable?: boolean | number,
+      testDone?: boolean | number,
+      statusRegister?: number,
+      unitIds?: number[]
+    }) => {
+      // 分发到 cardReducer 保持卡片状态同步
+      if (payload.connectionId) {
+        const conn = (modbusConnections.find(c => c.id === payload.connectionId)
+          || clients.find(c => c.id === payload.connectionId)) as any;
+        const host = conn?.host || conn?.address || '';
+        if (host) {
+          // 获取涉及的 unitIds，没有则跳过本次状态同步
+          if (!payload.unitIds || payload.unitIds.length === 0) return;
+          const targetUnits = payload.unitIds;
 
+          targetUnits.forEach((uid) => {
+            const deviceKey = `${host}_${String(uid).padStart(2, '0')}`;
+            let cardState: 'idle' | 'testing' | 'starting' | 'error' = 'idle';
+            let cardTestType: 'Cycle' | 'Single' | null = null;
 
+            if (payload.state === 'COMM_ERROR') {
+              cardState = 'error';
+              cardTestType = payload.testType === 'Single' ? 'Single' : 'Cycle';
+            } else if (payload.state === 'IDLE' || payload.state === 'RECOVERY_COMPLETE') {
+              cardState = 'idle';
+              cardTestType = null;
+            } else if (payload.state === 'STARTING') {
+              cardState = 'starting';
+              cardTestType = payload.testType === 'Single' ? 'Single' : 'Cycle';
+            } else if (payload.state === 'TESTING') {
+              cardState = 'testing';
+              cardTestType = payload.testType === 'Single' ? 'Single' : 'Cycle';
+            }
 
-  // 停止周期测试函数（不发送强制命令，用于F1周期测试）
-  const handleStopCyclicTest = useCallback(async (deviceId: string) => {
-    try {
-      const response = await fetch('/api/polling/devices/test/stop-cyclic', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ deviceId })
-      });
+            dispatchCardAction({
+              type: 'SET_TESTING_STATE',
+              key: deviceKey,
+              state: cardState,
+              testType: cardTestType
+            });
 
-      const result = await response.json();
-      if (result.success) {
-        console.log(`✅ 设备${deviceId}周期测试停止成功`);
-        return true;
-      } else {
-        console.error(`❌ 设备${deviceId}周期测试停止失败:`, result.message);
-        return false;
+            if (payload.message) {
+              dispatchCardAction({
+                type: 'ADD_FEEDBACK',
+                key: deviceKey,
+                level: payload.state === 'COMM_ERROR' ? 'error' : (payload.state === 'TESTING' ? 'success' : 'info'),
+                message: payload.message
+              });
+            }
+          });
+        }
       }
-    } catch (error) {
-      console.error(`❌ 停止设备${deviceId}周期测试时出错:`, error);
-      return false;
+    };
+    socket.on('testStateChange', handleTestStateChange);
+
+    return () => {
+      socket.off('testStateChange', handleTestStateChange);
     }
-  }, []);
+  }, [socket, clients, modbusConnections]);
 
-  // 重置状态寄存器为0的函数
-  const resetRegisterStatus = useCallback(() => {
+  // 监听单次测试 RAW 数据更新
+  useEffect(() => {
+    if (!socket) return;
 
-    setRegisterStatus({
-      statusRegister: 0,
-      controlRegisterA: 0,
-      controlRegisterB: 0,
-      statusBits: {
-        measEnable: false,
-        measRunning: false,
-        alarmCell1Ov: false,
-        alarmCell1Uv: false,
-        commTimeout: false,
-        testDone: false,
-        forceStopped: false,
-        dataReady: false,
-        commError: false,
-        rawValue: 0,
-        binaryString: '0000000000000000'
-      }
-    });
-  }, []);
+    const handleSingleTestRawData = (data: {
+      connectionId: string;
+      host: string;
+      voltage?: number;
+      rawDataByUnit: Record<number, {
+        r1?: number;
+        r2?: number;
+        r3?: number;
+        rawR2: number[];
+        rawR3: number[];
+        parsedR2: number[];
+        parsedR3: number[];
+      }>;
+      timestamp: string;
+    }) => {
+      console.log('收到单次测试 RAW 数据:', data);
+      if (!data || !data.rawDataByUnit) return;
+
+      setRawTestResults((prev) => {
+        const next = { ...prev };
+        Object.entries(data.rawDataByUnit).forEach(([uidStr, rawData]) => {
+          const uid = parseInt(uidStr, 10);
+          const deviceKey = `${data.host}_${String(uid).padStart(2, '0')}`;
+          const entry = {
+            r1: rawData.r1,
+            r2: rawData.r2,
+            r3: rawData.r3,
+            voltage: data.voltage,
+            rawR2: rawData.rawR2 || [],
+            rawR3: rawData.rawR3 || [],
+            parsedR2: rawData.parsedR2 || [],
+            parsedR3: rawData.parsedR3 || [],
+            timestamp: data.timestamp || new Date().toISOString()
+          };
+          next[deviceKey] = [...(prev[deviceKey] || []), entry];
+        });
+        return next;
+      });
+    };
+
+    socket.on('singleTestRawData', handleSingleTestRawData);
+
+    return () => {
+      socket.off('singleTestRawData', handleSingleTestRawData);
+    };
+  }, [socket]);
 
   // 监听实时电池数据更新
   useEffect(() => {
@@ -550,26 +413,35 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
           mac: actualData.mac || '',
         };
 
-        // 根据测试类型分类数据
-        // 添加到实时数据列表（保持原有逻辑用于兼容）
-        setRealtimeData(prev => {
-          // 检查是否已存在相同ID的数据
-          const existingIndex = prev.findIndex(item =>
-            item.deviceNumber === processedData.deviceNumber &&
-            item.mac === processedData.mac &&
-            item.timestamp === processedData.timestamp
-          );
-
-          if (existingIndex >= 0) {
-            // 更新现有数据
-            const updated = [...prev];
-            updated[existingIndex] = processedData;
-            return updated;
+        // 单次测试数据不进入主表，仅在 DeviceCard Dialog 中展示
+        const ipPrefix = processedData.ip_prefix || (typeof processedData.mac === 'string' ? String(processedData.mac).split('_')[0] : '');
+        const devAddr = processedData.deviceAddress ?? processedData.device_address ?? (typeof processedData.mac === 'string' ? String(processedData.mac).split('_')[1] : '');
+        if (ipPrefix && devAddr) {
+          const key = `${ipPrefix}_${String(devAddr).padStart(2, '0')}`;
+          if (cardStates[key]?.testType === 'Single') {
+            // 跳过：单次测试数据仅展示在卡片 Dialog 中
           } else {
-            // 添加新数据，按时间戳排序，最新的在前
-            return [processedData, ...prev].slice(0, 200); // 限制最多显示200条
+            // F1/F2 数据正常入表
+            setRealtimeData(prev => {
+              // 检查是否已存在相同ID的数据
+              const existingIndex = prev.findIndex(item =>
+                item.deviceNumber === processedData.deviceNumber &&
+                item.mac === processedData.mac &&
+                item.timestamp === processedData.timestamp
+              );
+
+              if (existingIndex >= 0) {
+                // 更新现有数据
+                const updated = [...prev];
+                updated[existingIndex] = processedData;
+                return updated;
+              } else {
+                // 添加新数据，按时间戳排序，最新的在前
+                return [processedData, ...prev].slice(0, 200); // 限制最多显示200条
+              }
+            });
           }
-        });
+        }
 
         // 将电池数据中的寄存器字段回填到寄存器缓存，保证解析页及时刷新
         const statusRaw =
@@ -643,25 +515,6 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
         statusBits: data.statusBits
       });
 
-      // 合并新的寄存器数据，保持现有结构
-      setRegisterStatus((prev: any) => ({
-        ...prev,
-        statusRegister: data.statusRegister !== undefined ? data.statusRegister : prev.statusRegister,
-        controlRegisterA: data.controlRegisterA !== undefined ? data.controlRegisterA : prev.controlRegisterA,
-        controlRegisterB: data.controlRegisterB !== undefined ? data.controlRegisterB : prev.controlRegisterB,
-        r1: data.r1 !== undefined ? data.r1 : prev.r1,
-        r2: data.r2 !== undefined ? data.r2 : prev.r2,
-        statusBits: data.statusBits ? {
-          ...prev.statusBits,
-          ...data.statusBits
-        } : prev.statusBits,
-        deviceNumber: data.deviceNumber,
-        mac: data.mac,
-        timestamp: data.timestamp,
-        connectionId: data.connectionId,
-        host: data.host
-      }));
-
       // 写入设备状态缓存，绑定到 host 与设备号
       try {
         const host: string = (data.host !== undefined && data.host !== null)
@@ -701,16 +554,8 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
     const handleStartF2FastTestResponse = (data: any) => {
       if (data?.success) {
         setSuccess(data.message || 'F2快速测试已启动');
-        setLastCommandResult('命令写入成功，正在进行F2快速测试');
-        setF2TestingTimeLeft(0);
-        setF2MeasEnableValue(0);
-        setF2TestDoneValue(0);
       } else {
         setError(data?.message || 'F2快速测试启动失败');
-        setLastCommandResult(`${data?.message || 'F2快速测试启动失败'}`);
-        setF2TestingTimeLeft(0);
-        setF2MeasEnableValue(null);
-        setF2TestDoneValue(null);
         setTestingState(prev => ({ ...prev, isF2Testing: false, f2CooldownTime: 0 }));
       }
     };
@@ -730,8 +575,6 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
       console.log('扫描完成事件:', data);
       const devices: number[] = data.onlineDevices || [];
       setOnlineDevices(devices);
-      // 扫描完成后自动选中所有在线设备
-      setSelectedDevices(devices.map(String));
       setIsScanning(false);
       setScanProgress({ current: data.totalScanned || DEVICE_UNIT_TOTAL, total: data.totalScanned || DEVICE_UNIT_TOTAL });
     });
@@ -780,23 +623,11 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
     // 轮询相关事件监听
     socket.on('pollingStarted', (data) => {
       console.log('轮询开始:', data);
-      setPollingStatus({
-        isPolling: true,
-        testType: data.testType,
-        devices: data.devices,
-        startTime: new Date()
-      });
       setSuccess(`${data.testType} 轮询已开始，设备数量: ${data.devices.length}`);
     });
 
     socket.on('pollingStopped', (data) => {
       console.log('轮询停止:', data);
-      setPollingStatus({
-        isPolling: false,
-        testType: null,
-        devices: [],
-        startTime: null
-      });
       const message = data.reason ||
         `设备 ${data.deviceId} 测试已停止 (轮询:${data.pollingStopSuccess ? '成功' : '失败'}, 设备命令:${data.deviceStopSuccess ? '成功' : '失败'})`;
       setSuccess(`轮询已停止: ${message}`);
@@ -823,36 +654,9 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
       console.log('测试完成:', data);
 
       if (data.testType === 'F2') {
-        setLastCommandResult('数据读取结束，共六十条，等待冷却结束');
-        setF2TestingTimeLeft(0);
+        setTestingState(prev => ({ ...prev, f2CooldownTime: 0 }));
       } else {
         setSuccess(`设备 ${data.deviceId} 的 ${data.testType} 测试完成`);
-      }
-
-      // 清除对应测试类型的状态
-      if (data.testType === 'F1') {
-        setTestingState(prev => {
-          const newTestingDevices = new Set(prev.testingDevices);
-          newTestingDevices.delete(data.deviceId);
-          return {
-            ...prev,
-            testingDevices: newTestingDevices,
-            isF1Testing: newTestingDevices.size === 0 ? false : prev.isF1Testing
-          };
-        });
-        console.log(`已清除设备 ${data.deviceId} 的F1测试状态`);
-      }
-
-      if (data.testType === 'F2') {
-        setTestingState(prev => {
-          const newTestingDevices = new Set(prev.testingDevices);
-          newTestingDevices.delete(data.deviceId);
-          return {
-            ...prev,
-            testingDevices: newTestingDevices
-          };
-        });
-        console.log(`已清除设备 ${data.deviceId} 的F2测试状态`);
       }
     });
 
@@ -1025,43 +829,6 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
     }
   }, [modbusConnections, clients, selectedIp, selectedDeviceAddr, registerStatusByDevice]);
 
-  // 基于当前数据显示页面的设备数据，派生状态寄存器原始值与位解析
-  const latestDisplayRow = filteredData && filteredData.length > 0 ? filteredData[0] : undefined;
-  const deriveStatusRawFromRow = (row: any): number | undefined => {
-    if (!row) return undefined;
-    // 多种兼容形态：statusRegister、status.statusRegister、status.rawValue、statusBits.rawValue、status.binaryString
-    if (typeof row.statusRegister === 'number') return row.statusRegister;
-    if (row.status && typeof row.status.statusRegister === 'number') return row.status.statusRegister;
-    if (row.status && typeof row.status.rawValue === 'number') return row.status.rawValue;
-    if (row.statusBits && typeof row.statusBits.rawValue === 'number') return row.statusBits.rawValue;
-    if (row.status && typeof row.status.binaryString === 'string') {
-      const bin = String(row.status.binaryString).replace(/[^01]/g, '');
-      if (bin.length > 0) return parseInt(bin, 2);
-    }
-    return undefined;
-  };
-  const displayStatusRawValue = (() => {
-    // 优先使用当前选中设备的缓存值，确保寄存器解析页与设备选择一致
-    if (typeof selectedReg?.statusRegister === 'number') return selectedReg.statusRegister;
-    const fromRow = deriveStatusRawFromRow(latestDisplayRow);
-    if (typeof fromRow === 'number') return fromRow;
-    return 0;
-  })();
-  const parsedStatusDisplay = {
-    measEnable: (displayStatusRawValue & 0x0001) !== 0,
-    measRunning: (displayStatusRawValue & 0x0002) !== 0,
-    // 协议文档未定义独立的 COOLDOWN_LOCKED 位，改为根据F2运行态+MEAS_ENABLE近似展示
-    cooldownLocked: testingState.isF2Testing && f2MeasEnableValue === 1,
-    alarmCell1Ov: (displayStatusRawValue & 0x0004) !== 0,
-    alarmCell1Uv: (displayStatusRawValue & 0x0008) !== 0,
-    commTimeout: (displayStatusRawValue & 0x0010) !== 0,
-    testDone: (displayStatusRawValue & 0x0020) !== 0,
-    forceStopped: (displayStatusRawValue & 0x0040) !== 0,
-    dataReady: (displayStatusRawValue & 0x0080) !== 0,
-    commError: (displayStatusRawValue & 0x0100) !== 0,
-    deviceAddr: (displayStatusRawValue & 0xFE00) >> 9
-  };
-
   // 清除页面数据（不删除数据库数据）
   const handleClearData = useCallback(() => {
     console.log('清除页面显示数据');
@@ -1202,22 +969,16 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
               <TableCell>时间</TableCell>
               <TableCell>IP地址</TableCell>
               <TableCell>设备地址</TableCell>
-              <TableCell>电池电压(mV)</TableCell>
-              <TableCell>Bat1 R1(μΩ)</TableCell>
-              <TableCell>Bat1 R2(μΩ)</TableCell>
-              <TableCell>Bat1 R3(μΩ)</TableCell>
-              <TableCell>Bat3 R1(μΩ)</TableCell>
-              <TableCell>Bat3 R2(μΩ)</TableCell>
-              <TableCell>Bat3 R3(μΩ)</TableCell>
-              <TableCell>Bat4 R1(μΩ)</TableCell>
-              <TableCell>Bat4 R2(μΩ)</TableCell>
-              <TableCell>Bat4 R3(μΩ)</TableCell>
+              <TableCell>OCV(mV)</TableCell>
+              <TableCell>Rohm(μΩ)</TableCell>
+              <TableCell>Rsei(μΩ)</TableCell>
+              <TableCell>Rct(μΩ)</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
             {data.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={13} align="center">
+                <TableCell colSpan={7} align="center">
                   <Typography variant="body2" color="text.secondary">
                     {isConnected ? '暂无实时数据' : '未连接到服务器'}
                   </Typography>
@@ -1247,16 +1008,6 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
                   <TableCell>{hasValue(firstDefined(row.r_ohm?.actual, row.r1?.actual)) ? formatValue(firstDefined(row.r_ohm?.actual, row.r1?.actual), '', 0) : '-'}</TableCell>
                   <TableCell>{hasValue(firstDefined(row.r_sei?.actual, row.r2?.actual)) ? formatValue(firstDefined(row.r_sei?.actual, row.r2?.actual), '', 0) : '-'}</TableCell>
                   <TableCell>{hasValue(firstDefined(row.r_ct?.actual, row.r3?.actual)) ? formatValue(firstDefined(row.r_ct?.actual, row.r3?.actual), '', 0) : '-'}</TableCell>
-
-                  {/* Bat3 */}
-                  <TableCell>{hasValue(row.bat3_r1?.actual) ? formatValue(row.bat3_r1.actual, '', 0) : '-'}</TableCell>
-                  <TableCell>{hasValue(row.bat3_r2?.actual) ? formatValue(row.bat3_r2.actual, '', 0) : '-'}</TableCell>
-                  <TableCell>{hasValue(row.bat3_r3?.actual) ? formatValue(row.bat3_r3.actual, '', 0) : '-'}</TableCell>
-
-                  {/* Bat4 */}
-                  <TableCell>{hasValue(row.bat4_r1?.actual) ? formatValue(row.bat4_r1.actual, '', 0) : '-'}</TableCell>
-                  <TableCell>{hasValue(row.bat4_r2?.actual) ? formatValue(row.bat4_r2.actual, '', 0) : '-'}</TableCell>
-                  <TableCell>{hasValue(row.bat4_r3?.actual) ? formatValue(row.bat4_r3.actual, '', 0) : '-'}</TableCell>
                 </TableRow>
               ))
             )}
@@ -1306,404 +1057,76 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
 
 
 
-  // 设备选择处理
-  const handleDeviceSelection = (deviceId: string, selected: boolean) => {
-    // 如果正在进行测试，禁止修改设备选择
-    if (testingState.isF1Testing || testingState.isF2Testing) {
-      setLastCommandResult('⚠️ 测试进行中，无法修改设备选择');
-      return;
-    }
-
-    if (selected) {
-      setSelectedDevices(prev => [...prev, deviceId]);
-    } else {
-      setSelectedDevices(prev => prev.filter(m => m !== deviceId));
-    }
-  };
-
-  // 全选/取消全选
-  const handleSelectAll = () => {
-    // 如果正在进行测试，禁止修改设备选择
-    if (testingState.isF1Testing || testingState.isF2Testing) {
-      setLastCommandResult('⚠️ 测试进行中，无法修改设备选择');
-      return;
-    }
-
-    // 统一使用 UID 字符串（"1"-"128"），不再混入连接 ID
-    const allUIDs = onlineDevices.map(String);
-    if (selectedDevices.length === allUIDs.length && allUIDs.length > 0) {
-      setSelectedDevices([]);
-    } else {
-      setSelectedDevices(allUIDs);
-    }
-  };
-
-  // 监听命令响应
-  useEffect(() => {
-    if (!socket) return;
-
-    const handleCommandResponse = (response: { success: boolean; message: string; mac?: string; command?: number }) => {
-      if (response.success) {
-        setLastCommandResult(`✅ ${response.message}`);
-      } else {
-        setLastCommandResult(`❌ ${response.message}`);
-      }
-    };
-
-    const handleBatchCommandResponse = (response: any) => {
-      if (response.success) {
-        const { summary } = response;
-        setLastCommandResult(`✅ 批量命令执行完成: 成功${summary.success}/${summary.total}个设备`);
-      } else {
-        setLastCommandResult(`❌ 批量命令执行失败: ${response.message}`);
-      }
-    };
-
-    const handleReadRegistersResponse = (response: any) => {
-      if (response.success) {
-        setLastCommandResult(prev => prev + ' | 读寄存器成功');
-      } else {
-        setLastCommandResult(prev => prev + ` | 读寄存器失败: ${response.error}`);
-      }
-    };
-
-    socket.on('commandResponse', handleCommandResponse);
-    socket.on('batchCommandResponse', handleBatchCommandResponse);
-    socket.on('readRegistersResponse', handleReadRegistersResponse);
-
-    return () => {
-      socket.off('commandResponse', handleCommandResponse);
-      socket.off('batchCommandResponse', handleBatchCommandResponse);
-      socket.off('readRegistersResponse', handleReadRegistersResponse);
-    };
-  }, [socket]);
-
-
-  /*
-    const clearDeviceStatus = useCallback(async () => {
-      if (selectedDevices.length === 0) {
-        setError('请先选择要清除状态的设备');
-        return;
-      }
-  
-      try {
-        setIsLoading(true);
-        setError(null);
-        setSuccess(null);
-        
-        // 为每个选中的设备清除状态/告警位
-        // 功能说明：向控制寄存器A (0x0001) 写入 0x0004 命令
-        // 用于清除设备的状态寄存器和告警位，重置设备错误状态
-        const results = [];
-        for (const deviceId of selectedDevices) {
-          const response = await fetch('/api/polling/devices/status/clear-alarm', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ deviceId: deviceId })
-          }); 
-  
-          const result = await response.json();
-          results.push({ deviceId, result });
-        }
-  
-        const successCount = results.filter(r => r.result.success).length;
-        if (successCount === selectedDevices.length) {
-          setSuccess('设备状态寄存器和告警位已清除，设备错误状态已重置');
-          setLastCommandResult(`✅ 状态/告警清除成功 (${successCount}/${selectedDevices.length}个设备)`);
-        } else if (successCount > 0) {
-          const failedDevices = results.filter(r => !r.result.success).map(r => r.deviceId);
-          setError(`部分设备清除状态失败: ${failedDevices.join(', ')}`);
-          setLastCommandResult(`⚠️ 状态清除部分成功: 成功${successCount}个，失败${selectedDevices.length - successCount}个`);
-        } else {
-          const failedDevices = results.filter(r => !r.result.success).map(r => r.deviceId);
-          setError(`所有设备清除状态失败: ${failedDevices.join(', ')}`);
-          setLastCommandResult(`❌ 状态清除完全失败: ${selectedDevices.length}个设备都失败`);
-        }
-      } catch (error) {
-        setError('清除状态失败: ' + error);
-        setLastCommandResult(`❌ 清除状态失败: ${error}`);
-      } finally {
-        setIsLoading(false);
-      }
-    }, [selectedDevices]);
-  */
-  // F1测试（支持启动和停止）- 简化的互锁逻辑
-  const handleSingleF1Test = useCallback(async () => {
-    if (selectedDevices.length === 0) {
-      setError('请先选择要测试的设备');
-      return;
-    }
-
-    // 简化的互锁检查：如果正在进行F2测试，则不能启动F1测试
-    if (testingState.isF2Testing) {
-      setError('无法启动F1测试：正在进行F2测试，请等待F2测试完成');
-      return;
-    }
-
-    // 检查是否正在进行F1测试
-    if (testingState.isF1Testing || testingState.testStatus === 'error') {
-      // 停止测试
-      try {
-        setIsLoading(true);
-        setError(null);
-        setSuccess(null);
-
-        const firstConnected = clients.find(c => c.isConnected && c.id);
-        const connectionIdToStop = firstConnected ? firstConnected.id : null;
-
-        const results = [];
-        if (connectionIdToStop) {
-          const success = await handleStopCyclicTest(connectionIdToStop);
-          results.push({ deviceId: connectionIdToStop, success });
-        }
-
-        // 清除所有测试状态
-        setTestingState(prev => ({
-          ...prev,
-          isF1Testing: false,
-          testingDevices: new Set(),
-          activeF1Mode: null,
-          testStatus: 'idle'
-        }));
-
-        const successCount = results.filter(r => r.success).length;
-        if (successCount === results.length) {
-          setSuccess('F1测试停止成功');
-          setLastCommandResult(`⏹️ F1测试停止成功 (${successCount}/${results.length}个设备)`);
-          // 重置前端状态寄存器为0
-          resetRegisterStatus();
-        } else {
-          setError(`部分设备F1测试停止失败`);
-          setLastCommandResult(`⚠️ F1测试停止部分成功: 成功${successCount}个，失败${results.length - successCount}个`);
-        }
-      } catch (error) {
-        setError('F1测试停止失败: ' + error);
-        setLastCommandResult(`❌ F1测试停止失败: ${error}`);
-      } finally {
-        setIsLoading(false);
-      }
-      return;
-    }
-
-    // 启动广播写+轮询读测试
+  const handleCardStartF1 = useCallback(async (connectionId: string, uid: number, period: number, gear: number) => {
+    if (!connectionId) return false;
     try {
-      setIsLoading(true);
-      setError(null);
-      setSuccess(null);
-
-      // 找到一个已连接的 Modbus 连接 ID 作为通信通道
-      const firstConnected = clients.find(c => c.isConnected && c.id);
-      if (!firstConnected) {
-        setError('没有已连接的通信通道，无法启动测试');
-        setIsLoading(false);
-        return;
-      }
-      const representativeDeviceId = firstConnected.id;
-
       const response = await fetch('/api/polling/devices/test/f1-cyclic', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          deviceId: representativeDeviceId,
-          selectedDevices: selectedDevices,
-          periodSeconds: getEffectiveLoopPeriodSeconds()
+          deviceId: connectionId,
+          selectedDevices: [uid.toString()],
+          periodSeconds: period,
+          gearValue: gear
         })
       });
-
       const result = await response.json();
-
       if (result.success) {
-        // 后端确认启动成功后再更新按钮状态
-        setTestingState(prev => ({
-          ...prev,
-          isF1Testing: true,
-          testingDevices: new Set(selectedDevices),
-          activeF1Mode: 'cyclic',
-          testStatus: 'testing'
-        }));
-        setSuccess('F1广播周期测试启动成功');
-        setLastCommandResult(`F1广播周期测试启动成功 - 每${getEffectiveLoopPeriodSeconds()}秒广播写命令并轮询读取 - 再次点击可停止`);
-      } else {
-        setError(`F1广播周期测试启动失败: ${result.message || '未知错误'}`);
-        setLastCommandResult(`❌ F1广播周期测试启动失败: ${result.message || '未知错误'}`);
+        setSuccess(`设备 ${uid} F1周期测试启动成功`);
+        return true;
       }
-    } catch (error) {
-      // 捕获异常，回滚按钮状态
-      setTestingState(prev => ({
-        ...prev,
-        isF1Testing: false,
-        testingDevices: new Set(),
-        activeF1Mode: null,
-        testStatus: 'idle'
-      }));
-      setError('F1测试启动失败: ' + error);
-      setLastCommandResult(`❌ F1测试启动失败: ${error}`);
-    } finally {
-      setIsLoading(false);
+      return false;
+    } catch {
+      return false;
     }
-  }, [selectedDevices, testingState.isF1Testing, testingState.isF2Testing, testingState.testingDevices, handleStopCyclicTest, resetRegisterStatus, testingState.testStatus, clients, socket, getEffectiveLoopPeriodSeconds]);
+  }, []);
 
-  // F2测试（写命令启动，由后端静默等待25s，并随后监控TEST_DONE进入高频捞取数据）
-  const handleF2Test = useCallback(async () => {
-    if (testingState.isF1Testing) {
-      setError('无法启动F2测试：正在进行F1测试');
-      return;
-    }
-
-    if (testingState.isF2Testing) {
-      // 停止F2测试
-      try {
-        setIsLoading(true);
-        const firstConnected = clients.find(c => c.isConnected && c.id)
-          || modbusConnections.find((c: any) => c.isConnected && c.id);
-        const connectionIdToStop = firstConnected ? firstConnected.id : null;
-        if (connectionIdToStop && socket) {
-          socket.emit('stopTest', { connectionId: connectionIdToStop });
-          setSuccess('停止F2测试命令已发送');
-          setF2TestingTimeLeft(0);
-          setF2MeasEnableValue(null);
-          setF2TestDoneValue(null);
-          setTestingState(prev => ({ ...prev, isF2Testing: false, f2CooldownTime: 0 }));
-        }
-      } catch (err) {
-        setError('停止F2测试失败: ' + err);
-      } finally {
-        setIsLoading(false);
-      }
-      return;
-    }
-
-    // 启动F2测试
+  const handleCardStopF1 = useCallback(async (connectionId: string, uid: number) => {
+    if (!connectionId) return false;
     try {
-      setIsLoading(true);
-      const firstConnected = clients.find(c => c.isConnected && c.id)
-        || modbusConnections.find((c: any) => c.isConnected && c.id);
-      if (!firstConnected) {
-        setError('没有已连接的通信通道，无法启动测试');
-        setLastCommandResult('没有已连接的通信通道，无法启动F2测试');
-        return;
-      }
-
-      setTestingState(prev => ({ ...prev, isF2Testing: true }));
-      setF2TestingTimeLeft(0);
-      setF2MeasEnableValue(0);
-      setF2TestDoneValue(0);
-      setLastCommandResult('正在发送F2启动命令');
-
-      if (socket) {
-        socket.emit('startF2FastTest', {
-          connectionId: firstConnected.id,
-          targetUnitId: fastTestDeviceId
-        });
-      }
-    } catch (err) {
-      setTestingState(prev => ({ ...prev, isF2Testing: false }));
-      setError('F2测试启动失败: ' + err);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [clients, modbusConnections, testingState.isF1Testing, testingState.isF2Testing, fastTestDeviceId, socket]);
-
-  // 静置测试（F1写值0x0004，沿用F1轮询机制）
-  const handleStaticF1Test = useCallback(async () => {
-    if (selectedDevices.length === 0) {
-      setError('请先选择要测试的设备');
-      return;
-    }
-
-    // 互锁：F2测试进行中不能启动F1静置测试
-    if (testingState.isF2Testing) {
-      setError('无法启动静置测试：正在进行F2测试，请等待F2测试完成');
-      return;
-    }
-
-    // 如果当前已在进行F1测试，则点击静置测试按钮视为停止当前F1测试
-    if (testingState.isF1Testing) {
-      try {
-        setIsLoading(true);
-        setError(null);
-        setSuccess(null);
-
-        const results = [];
-        for (const deviceId of Array.from(testingState.testingDevices)) {
-          const success = await handleStopCyclicTest(deviceId);
-          results.push({ deviceId, success });
-        }
-
-        // 清除测试状态
-        setTestingState(prev => ({
-          ...prev,
-          isF1Testing: false,
-          testingDevices: new Set(),
-          activeF1Mode: null
-        }));
-
-        const successCount = results.filter(r => r.success).length;
-        if (successCount === results.length) {
-          setSuccess('静置测试已停止');
-          setLastCommandResult(`⏹️ 静置测试停止成功 (${successCount}/${results.length}个设备)`);
-          resetRegisterStatus();
-        } else {
-          setError('部分设备静置测试停止失败');
-          setLastCommandResult(`⚠️ 静置测试停止部分成功: 成功${successCount}个，失败${results.length - successCount}个`);
-        }
-      } catch (error) {
-        setError('静置测试停止失败: ' + error);
-        setLastCommandResult(`❌ 静置测试停止失败: ${error}`);
-      } finally {
-        setIsLoading(false);
-      }
-      return;
-    }
-
-    // 启动静置测试（广播写0x0001=0x0004，并按周期轮询读取）
-    try {
-      setIsLoading(true);
-      setError(null);
-      setSuccess(null);
-
-      const representativeDeviceId = selectedDevices[0];
-
-      const response = await fetch('/api/polling/devices/test/f1-cyclic', {
+      const response = await fetch('/api/polling/devices/test/stop-cyclic', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          deviceId: representativeDeviceId,
-          selectedDevices: selectedDevices,
-          periodSeconds: getEffectiveLoopPeriodSeconds(),
-          writeValue: 0x0004
+          deviceId: connectionId,
+          selectedDevices: [uid.toString()]
         })
       });
-
       const result = await response.json();
-
       if (result.success) {
-        setTestingState(prev => ({
-          ...prev,
-          isF1Testing: true,
-          testingDevices: new Set(selectedDevices),
-          activeF1Mode: 'static'
-        }));
-
-        setSuccess('静置测试启动成功');
-        setLastCommandResult(`静置测试启动成功 - 每${getEffectiveLoopPeriodSeconds()}秒广播写0x0001=0x0004并轮询读取`);
-      } else {
-        setError(`静置测试启动失败: ${result.message || '未知错误'}`);
-        setLastCommandResult(`❌ 静置测试启动失败: ${result.message || '未知错误'}`);
+        setSuccess(`设备 ${uid} F1周期测试已停止`);
+        return true;
       }
-    } catch (error) {
-      setError('静置测试启动失败: ' + error);
-      setLastCommandResult(`❌ 静置测试启动失败: ${error}`);
-    } finally {
-      setIsLoading(false);
+      return false;
+    } catch {
+      return false;
     }
-  }, [selectedDevices, testingState.isF1Testing, testingState.isF2Testing, testingState.testingDevices, handleStopCyclicTest, resetRegisterStatus, getEffectiveLoopPeriodSeconds]);
+  }, []);
+
+  const handleCardStartSingle = useCallback(async (connectionId: string, uid: number, gear: number) => {
+    if (!connectionId) return false;
+    try {
+      const response = await fetch('/api/polling/devices/test/single-test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          deviceId: connectionId,
+          selectedDevices: [uid.toString()],
+          gearValue: gear
+        })
+      });
+      const result = await response.json();
+      if (result.success) {
+        setSuccess(`设备 ${uid} 单次测试启动成功`);
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const isAnyDeviceTesting = Object.values(cardStates).some(c => c.testingState === 'testing' || c.testingState === 'starting') || testingState.isF2Testing;
 
   return (
     <Box>
@@ -1712,7 +1135,6 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
         <Tabs value={modbusTabValue} onChange={(_, newValue) => setModbusTabValue(newValue)}>
           <Tab label="测试控制" />
           <Tab label="连接管理" />
-          {/* 网络扫描Tab已移除 */}
         </Tabs>
       </Box>
 
@@ -1725,212 +1147,20 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
               测试控制
             </Typography>
 
-            {/* 设备选择 */}
-            <Box sx={{ mb: 3 }}>
-              <Typography variant="subtitle2" gutterBottom>
-                选择测试设备:
-              </Typography>
-              <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  onClick={handleSelectAll}
-                  sx={{ mr: 2 }}
-                  disabled={testingState.isF1Testing || testingState.isF2Testing}
-                >
-                  {selectedDevices.length === clients.filter(c => c.isConnected && c.id).length ? '取消全选' : '全选'}
-                </Button>
-                <Chip
-                  label={`已选择 ${selectedDevices.length} 个设备`}
-                  color={selectedDevices.length > 0 ? 'primary' : 'default'}
-                  size="small"
-                />
-              </Box>
-              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
-                {clients.filter(c => c.isConnected && c.id).map((client) => (
-                  <FormControlLabel
-                    key={client.id}
-                    control={
-                      <Checkbox
-                        checked={selectedDevices.includes(client.id)}
-                        onChange={(e) => handleDeviceSelection(client.id, e.target.checked)}
-                        size="small"
-                        disabled={testingState.isF1Testing || testingState.isF2Testing}
-                      />
-                    }
-                    label={`设备${client.id} | MAC: ${client.mac || 'Unknown'} | IP: ${client.address || 'Unknown'}`}
-                    sx={{ mr: 2 }}
-                  />
-                ))}
-              </Box>
-            </Box>
-
-            <Divider sx={{ my: 2 }} />
-
-            {/* 周期测试时间设置和寄存器显示 */}
-            <Box sx={{ mb: 3, display: 'flex', gap: 3, alignItems: 'flex-start' }}>
-              {/* 周期测试时间设置 */}
-              <Box sx={{ minWidth: 200 }}>
-                <TextField
-                  label="周期测试时间"
-                  type="number"
-                  value={loopIntervalInput}
-                  onChange={(e) => {
-                    const raw = e.target.value;
-                    // 允许清空输入框
-                    setLoopIntervalInput(raw);
-                    if (raw === '') {
-                      return;
-                    }
-                    const value = parseInt(raw, 10);
-                    if (!isNaN(value)) {
-                      // 精度为1秒
-                      setLoopIntervalTime(value);
-                    }
-                  }}
-                  onBlur={(e) => {
-                    const raw = (e.target.value ?? '').trim();
-                    if (raw === '') {
-                      // 空输入默认3秒
-                      setLoopIntervalTime(3);
-                      setLoopIntervalInput('3');
-                      return;
-                    }
-                    const value = parseInt(raw || '3', 10);
-                    // 精度为1秒并在范围内（3-60秒）
-                    // 检测设备接收到小于3秒检测频率，统一按3秒周期测试
-                    const clampedValue = Math.max(3, Math.min(60, isNaN(value) ? 3 : value));
-                    setLoopIntervalTime(clampedValue);
-                    setLoopIntervalInput(String(clampedValue));
-                  }}
-                  size="small"
-                  sx={{
-                    width: 180,
-                    '& .MuiInputBase-input:disabled': {
-                      color: 'rgba(0, 0, 0, 0.6)',
-                      WebkitTextFillColor: 'rgba(0, 0, 0, 0.6)'
-                    }
-                  }}
-                  inputProps={{ min: 3, max: 60, step: 1 }}
-                  helperText="3-60秒，精度1秒"
-                />
-              </Box>
-
-              {/* 寄存器显示界面 - 始终可见 */}
-              <Box sx={{ flex: 1, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 2 }}>
-
-                {/* 通讯超时特殊状态指示 */}
-                {parsedStatusDisplay.commTimeout && (
-                  <Box sx={{ gridColumn: '1 / -1', p: 2, border: '1px solid #ff9800', borderRadius: 1, backgroundColor: '#fff3e0' }}>
-                    <Typography variant="subtitle1" color="error" gutterBottom sx={{ fontWeight: 'bold' }}>
-                      通讯超时故障 (COMM_TIMEOUT)
-                    </Typography>
-                    {parsedStatusDisplay.measEnable ? (
-                      <Alert severity="error">通讯错误 + 测试中，系统正在自动恢复...</Alert>
-                    ) : (
-                      <Alert severity="warning">通讯错误 + 测试完成</Alert>
-                    )}
-                  </Box>
-                )}
-
-                {/* 状态寄存器显示 */}
-                <Box sx={{ p: 2, border: '1px solid #ddd', borderRadius: 1, backgroundColor: '#f8f9fa' }}>
-                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
-                    <Typography variant="subtitle2" sx={{ fontWeight: 'bold', color: 'primary.main' }}>
-                      状态寄存器 (0x0000)
-                    </Typography>
-                    {/* 自动恢复不再需要手动按钮 */}
-                  </Box>
-
-                  <Typography variant="body2" sx={{ fontFamily: 'monospace', display: 'block', mb: 1, color: 'text.secondary' }}>
-                    原始值: 0x{(displayStatusRawValue).toString(16).padStart(4, '0').toUpperCase()}
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontFamily: 'monospace', display: 'block', mb: 1, color: 'text.secondary' }}>
-                    二进制: {(displayStatusRawValue).toString(2).padStart(16, '0')}
-                  </Typography>
-                  <Box sx={{ fontSize: '0.75rem' }}>
-                    <Typography variant="caption" sx={{ fontWeight: 'bold', display: 'block', mb: 0.5 }}>状态位解析:</Typography>
-                    <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 0.2, fontSize: '0.7rem' }}>
-                      <Typography variant="caption" sx={{ color: parsedStatusDisplay.measEnable ? 'green' : 'gray' }}>
-                        Bit0 MEAS_ENABLE: {parsedStatusDisplay.measEnable ? '✓' : '✗'}
-                      </Typography>
-                      <Typography variant="caption" sx={{ color: parsedStatusDisplay.measRunning ? 'green' : 'gray' }}>
-                        Bit1 MEAS_RUNNING: {parsedStatusDisplay.measRunning ? '✓' : '✗'}
-                      </Typography>
-                      <Typography variant="caption" sx={{ color: parsedStatusDisplay.alarmCell1Ov ? 'red' : 'gray' }}>
-                        Bit2 ALARM_CELL1_OV: {parsedStatusDisplay.alarmCell1Ov ? '✓' : '✗'}
-                      </Typography>
-                      <Typography variant="caption" sx={{ color: parsedStatusDisplay.alarmCell1Uv ? 'red' : 'gray' }}>
-                        Bit3 ALARM_CELL1_UV: {parsedStatusDisplay.alarmCell1Uv ? '✓' : '✗'}
-                      </Typography>
-                      <Typography variant="caption" sx={{ color: parsedStatusDisplay.commTimeout ? 'red' : 'gray' }}>
-                        Bit4 COMM_TIMEOUT: {parsedStatusDisplay.commTimeout ? '✓' : '✗'}
-                      </Typography>
-                      <Typography variant="caption" sx={{ color: parsedStatusDisplay.testDone ? 'green' : 'gray' }}>
-                        Bit5 TEST_DONE: {parsedStatusDisplay.testDone ? '✓' : '✗'}
-                      </Typography>
-                      <Typography variant="caption" sx={{ color: parsedStatusDisplay.forceStopped ? 'red' : 'gray' }}>
-                        Bit6 FORCE_STOPPED: {parsedStatusDisplay.forceStopped ? '✓' : '✗'}
-                      </Typography>
-                      <Typography variant="caption" sx={{ color: parsedStatusDisplay.dataReady ? 'green' : 'gray' }}>
-                        Bit7 DATA_READY: {parsedStatusDisplay.dataReady ? '✓' : '✗'}
-                      </Typography>
-                      <Typography variant="caption" sx={{ color: parsedStatusDisplay.commError ? 'red' : 'gray' }}>
-                        Bit8 COMM_ERROR: {parsedStatusDisplay.commError ? '✓' : '✗'}
-                      </Typography>
-                      <Typography variant="caption" sx={{ color: 'gray' }}>
-                        Bit9-15 ADDR: {parsedStatusDisplay.deviceAddr}
-                      </Typography>
-                    </Box>
-                  </Box>
-                </Box>
-
-                {/* 控制寄存器显示 - 0x0006(A) 和 0x0007(B) */}
-                <Box sx={{ p: 2, border: '1px solid #ddd', borderRadius: 1, backgroundColor: '#f8f9fa' }}>
-                  <Typography variant="subtitle2" sx={{ fontWeight: 'bold', display: 'block', mb: 1, color: 'primary.main' }}>
-                    控制寄存器
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontFamily: 'monospace', display: 'block', mb: 1, color: 'text.secondary' }}>
-                    A (0x0001): 0x{(selectedReg?.controlRegisterA ?? 0).toString(16).toUpperCase().padStart(4, '0')}
-                  </Typography>
-                  <Typography variant="body2" sx={{ fontFamily: 'monospace', display: 'block', mb: 1, color: 'text.secondary' }}>
-                    B (0x0002): {(selectedReg?.controlRegisterB ?? 0)} (Cycle)
-                  </Typography>
-                  <Typography variant="caption" sx={{ color: isSelectedDeviceOffline ? 'error.main' : 'text.secondary', display: 'block', mt: 1 }}>
-                    {isSelectedDeviceOffline ? "注意: 该设备不在线 (已超过12秒无数据)" : ""}
-                  </Typography>
-                </Box>
-              </Box>
-            </Box>
-
-            <Divider sx={{ my: 2 }} />
-
-            {/* 轮询状态显示 */}
-            {pollingStatus.isPolling && (
-              <Box sx={{ mb: 3, p: 2, bgcolor: 'background.default', borderRadius: 1 }}>
-                <Typography variant="subtitle2" gutterBottom>
-                  轮询状态: {pollingStatus.testType} - 已运行 {pollingStatus.startTime ? Math.floor((Date.now() - new Date(pollingStatus.startTime).getTime()) / 1000) : 0} 秒
-                </Typography>
-                <Typography variant="body2">
-                  设备数量: {pollingStatus.devices.length} 个
-                </Typography>
-              </Box>
-            )}
-
             {/* 设备扫描与在线状态 */}
             <Box sx={{ mb: 3 }}>
               <Typography variant="subtitle2" gutterBottom>
-                设备扫描与操作 (<Typography component="span" variant="caption" sx={{ color: 'text.secondary' }}>先扫描设备，再进行周期测试，在线设备数: {onlineDevices.length}</Typography>):
+                设备扫描与操作 (<Typography component="span" variant="caption" sx={{ color: 'text.secondary' }}>先扫描设备，再进行卡片周期或单次测试，在线通道数: {onlineDevices.length}</Typography>):
               </Typography>
 
-              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2, mb: 2, alignItems: 'center' }}>
+              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2, mb: 3, alignItems: 'center' }}>
                 <Button
                   variant="contained"
                   color="info"
                   onClick={handleScanOnlineDevices}
-                  disabled={isScanning || !isConnected || clients.length === 0 || testingState.isF1Testing || testingState.isF2Testing}
+                  disabled={isScanning || !isConnected || clients.length === 0 || isAnyDeviceTesting}
                 >
-                  {isScanning ? "扫描中..." : `扫描在线设备 (${DEVICE_UNIT_MIN}-${DEVICE_UNIT_MAX})`}
+                  {isScanning ? "扫描中..." : `扫描在线通道 (1-12)`}
                 </Button>
 
                 {isScanning && (
@@ -1945,152 +1175,53 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
                 )}
               </Box>
 
-              {/* 128设备网格显示 */}
-              <Box sx={{
-                p: 2,
-                bgcolor: 'background.paper',
-                borderRadius: 1,
-                border: '1px solid #e0e0e0',
-                mb: 3
-              }}>
-                <Typography variant="caption" sx={{ display: 'block', mb: 1, color: 'text.secondary' }}>
-                  在线设备指示 (绿色: 在线 / 已选中, 灰色: 离线 / 未选中) - 点击可更改选中状态
-                </Typography>
-                <Grid container spacing={0.5}>
-                  {Array.from({ length: DEVICE_UNIT_TOTAL }, (_, i) => DEVICE_UNIT_MIN + i).map((id) => {
-                    const isOnline = onlineDevices.includes(id);
-                    const isSelected = selectedDevices.includes(id.toString());
+              {/* 12通道设备卡片网格 */}
+              {selectedIp ? (
+                <Box sx={{ mt: 3 }}>
+                  <Typography variant="subtitle1" gutterBottom sx={{ fontWeight: 'bold', mb: 2 }}>
+                    设备通道控制卡片 ({selectedIp})
+                  </Typography>
+                  <Grid container spacing={2}>
+                    {Array.from({ length: 12 }, (_, i) => i + 1).map((uid) => {
+                      const deviceKey = `${selectedIp}_${String(uid).padStart(2, '0')}`;
+                      const activeConn = modbusConnections.find(conn => conn.host === selectedIp);
+                      const connectionId = activeConn?.id || '';
+                      const isOnline = onlineDevices.includes(uid);
+                      const config = cardStates[deviceKey];
+                      const regData = registerStatusByDevice[deviceKey];
+                      const statusData = regData ? {
+                        dataReady: (regData.statusRegister & 0x0080) !== 0,
+                        testDone: (regData.statusRegister & 0x0020) !== 0
+                      } : undefined;
 
-                    return (
-                      <Grid item key={id} sx={{ width: '12.5%' }}>
-                        <Box
-                          onClick={() => {
-                            const idStr = id.toString();
-                            setSelectedDevices(prev =>
-                              prev.includes(idStr)
-                                ? prev.filter(x => x !== idStr)
-                                : [...prev, idStr]
-                            );
-                          }}
-                          sx={{
-                            bgcolor: isSelected ? 'success.main' : (isOnline ? 'success.light' : 'grey.300'),
-                            color: isSelected ? 'white' : (isOnline ? 'white' : 'text.disabled'),
-                            borderRadius: 1,
-                            p: 0.5,
-                            textAlign: 'center',
-                            fontSize: '0.75rem',
-                            cursor: 'pointer',
-                            border: isSelected ? '2px solid #2e7d32' : '1px solid transparent',
-                            '&:hover': {
-                              opacity: 0.8
-                            }
-                          }}
-                        >
-                          {id}
-                        </Box>
-                      </Grid>
-                    );
-                  })}
-                </Grid>
-              </Box>
-
-              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2, mb: 2 }}>
-                <Button
-                  variant="contained"
-                  color={testingState.testStatus === 'error' ? "warning" : (testingState.isF1Testing && testingState.activeF1Mode === 'cyclic' ? "error" : "primary")}
-                  onClick={() => handleSingleF1Test()}
-                  disabled={
-                    testingState.testStatus === 'error' ||
-                    !isConnected ||
-                    testingState.isF2Testing ||
-                    (testingState.isF1Testing && testingState.activeF1Mode === 'static')
-                  }
-                >
-                  {testingState.testStatus === 'error' ? "通讯错误恢复中..." : (testingState.isF1Testing && testingState.activeF1Mode === 'cyclic' ? "停止周期测试" : "周期测试")}
-                </Button>
-                <Button
-                  variant="outlined"
-                  color={testingState.isF1Testing && testingState.activeF1Mode === 'static' ? "error" : "secondary"}
-                  onClick={() => handleStaticF1Test()}
-                  disabled={true}
-                  style={{ display: 'none' }}
-                  title="向控制寄存器A(0x0001)广播写入0x0004并按周期轮询读取"
-                >
-                  {testingState.isF1Testing && testingState.activeF1Mode === 'static' ? "停止静置测试" : "静置测试"}
-                </Button>
-
-                <Button
-                  variant="contained"
-                  color={testingState.isF2Testing ? "error" : "warning"}
-                  onClick={() => handleF2Test()}
-                  disabled={
-                    !isConnected ||
-                    testingState.isF1Testing ||
-                    testingState.isF2Testing
-                  }
-                >
-                  {testingState.isF2Testing ? '停止快速测试' : '快速测试'}
-                </Button>
-
-                <FormControl size="small" sx={{ minWidth: 80 }}>
-                  <InputLabel id="fast-test-device-select-label">快速测试设备号</InputLabel>
-                  <Select
-                    labelId="fast-test-device-select-label"
-                    id="fast-test-device-select"
-                    value={fastTestDeviceId}
-                    label="快速测试设备号"
-                    onChange={(e) => setFastTestDeviceId(Number(e.target.value))}
-                    disabled={testingState.isF2Testing}
-                  >
-                    {(onlineDevices.length > 0 ? onlineDevices : Array.from({ length: DEVICE_UNIT_TOTAL }, (_, i) => DEVICE_UNIT_MIN + i)).map((n) => (
-                      <MenuItem key={n} value={n}>
-                        {n} {onlineDevices.length > 0 ? '(在线)' : ''}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-
-                {/* <Button
-              variant="outlined"
-              onClick={clearDeviceStatus}
-              disabled={!isConnected || selectedDevices.length === 0}
-              title="清除选中设备的状态寄存器和告警位，用于重置设备错误状态"
-            >
-              清除状态/告警
-            </Button> */}
-              </Box>
+                      return (
+                        <Grid item key={uid} xs={12} sm={6} md={4} lg={3}>
+                          <DeviceCard
+                            connectionId={connectionId}
+                            deviceKey={deviceKey}
+                            host={selectedIp}
+                            uid={uid}
+                            isOnline={isOnline}
+                            config={config}
+                            dispatch={dispatchCardAction}
+                            onStartF1={handleCardStartF1}
+                            onStopF1={handleCardStopF1}
+                            onStartSingle={handleCardStartSingle}
+                            statusData={statusData}
+                            rawTestHistory={rawTestResults[deviceKey]}
+                          />
+                        </Grid>
+                      );
+                    })}
+                  </Grid>
+                </Box>
+              ) : (
+                <Alert severity="info" sx={{ mt: 3 }}>
+                  请选择或连接一个 Modbus IP 主机以查看和控制 12 通道设备。
+                </Alert>
+              )}
             </Box>
 
-            {/* 命令执行结果 */}
-            {lastCommandResult && (
-              <Box sx={{ mt: 2 }}>
-                <Typography variant="subtitle2" gutterBottom>
-                  执行结果:
-                </Typography>
-                <Paper
-                  elevation={1}
-                  sx={{
-                    p: 2,
-                    backgroundColor: /(失败|错误|异常)/.test(lastCommandResult) ? '#ffebee' : '#e8f5e8',
-                    border: /(失败|错误|异常)/.test(lastCommandResult) ? '1px solid #f44336' : '1px solid #4caf50'
-                  }}
-                >
-                  <Typography variant="body2" sx={{ fontFamily: 'monospace', whiteSpace: 'pre-line' }}>
-                    {lastCommandResult}
-                  </Typography>
-                </Paper>
-                {testingState.isF2Testing && (
-                  <Box sx={{ mt: 2 }}>
-                    <Typography variant="body2" sx={{ mb: 0.5 }}>
-                      Bit0 MEAS_ENABLE = {f2MeasEnableValue ?? '-'}
-                    </Typography>
-                    <Typography variant="body2" sx={{ mb: 1 }}>
-                      Bit5 TEST_DONE = {f2TestDoneValue ?? '-'}
-                    </Typography>
-                  </Box>
-                )}
-              </Box>
-            )}
           </Paper>
 
           {/* 数据监控标题和控制区域 */}
@@ -2155,29 +1286,19 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
             </Paper>
             <Box>
               <Box sx={{ mb: 2, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-                {Object.entries(registerStatusByDevice)
-                  .filter(([key, data]) => {
-                    if (!selectedIp) return false;
-                    if (!key.startsWith(selectedIp + '_')) return false;
-                    if (!data.timestamp) return false;
-                    return (Date.now() - new Date(data.timestamp).getTime()) <= 120000;
-                  })
-                  .map(([key]) => parseInt(key.split('_')[1], 10))
-                  .filter((v, i, a) => !isNaN(v) && a.indexOf(v) === i)
-                  .sort((a, b) => a - b)
-                  .map((n) => (
-                    <Button
-                      key={n}
-                      variant={selectedDeviceAddr === String(n) ? 'contained' : 'outlined'}
-                      color={selectedDeviceAddr === String(n) ? 'success' : 'inherit'}
-                      size="small"
-                      sx={{ minWidth: 36, height: 36, borderRadius: 1 }}
-                      onClick={() => setSelectedDeviceAddr(String(n))}
-                      disabled={!selectedIp}
-                    >
-                      {n}
-                    </Button>
-                  ))}
+                {Array.from({ length: 12 }, (_, i) => i + 1).map((n) => (
+                  <Button
+                    key={n}
+                    variant={selectedDeviceAddr === String(n) ? 'contained' : 'outlined'}
+                    color={selectedDeviceAddr === String(n) ? 'success' : 'inherit'}
+                    size="small"
+                    sx={{ minWidth: 36, height: 36, borderRadius: 1 }}
+                    onClick={() => setSelectedDeviceAddr(String(n))}
+                    disabled={!selectedIp}
+                  >
+                    {n}
+                  </Button>
+                ))}
                 <Button
                   variant="outlined"
                   size="small"
@@ -2228,7 +1349,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
                   variant="contained"
                   startIcon={<AddIcon />}
                   onClick={() => setIsConnectionDialogOpen(true)}
-                  disabled={testingState.isF1Testing || testingState.isF2Testing}
+                  disabled={isAnyDeviceTesting}
                   sx={{ mr: 1 }}
                 >
                   新建连接
@@ -2237,7 +1358,7 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
                   variant="contained"
                   startIcon={<PingIcon />}
                   onClick={handleAutoDiscoverAndConnect}
-                  disabled={isAutoDiscovering || testingState.isF1Testing || testingState.isF2Testing}
+                  disabled={isAutoDiscovering || isAnyDeviceTesting}
                   color="primary"
                   sx={{ mr: 1 }}
                 >
@@ -2455,8 +1576,8 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
             value={newConnection.host}
             onChange={(e) => setNewConnection(prev => ({ ...prev, host: e.target.value }))}
             sx={{ mb: 2 }}
-            disabled={testingState.isF1Testing || testingState.isF2Testing}
-            helperText={(testingState.isF1Testing || testingState.isF2Testing) ? '测试期间禁用输入' : ''}
+            disabled={isAnyDeviceTesting}
+            helperText={isAnyDeviceTesting ? '测试期间禁用输入' : ''}
           />
           <TextField
             margin="dense"
@@ -2467,8 +1588,8 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
             value={newConnection.port}
             onChange={(e) => setNewConnection(prev => ({ ...prev, port: parseInt(e.target.value) || 502 }))}
             sx={{ mb: 2 }}
-            disabled={testingState.isF1Testing || testingState.isF2Testing}
-            helperText={(testingState.isF1Testing || testingState.isF2Testing) ? '测试期间禁用输入' : ''}
+            disabled={isAnyDeviceTesting}
+            helperText={isAnyDeviceTesting ? '测试期间禁用输入' : ''}
           />
           <TextField
             margin="dense"
@@ -2478,13 +1599,13 @@ const DataDisplay: React.FC<DataDisplayProps> = ({ displayMode }) => {
             variant="outlined"
             value={newConnection.deviceId}
             onChange={(e) => setNewConnection(prev => ({ ...prev, deviceId: parseInt(e.target.value) || 1 }))}
-            disabled={testingState.isF1Testing || testingState.isF2Testing}
-            helperText={(testingState.isF1Testing || testingState.isF2Testing) ? '测试期间禁用输入' : ''}
+            disabled={isAnyDeviceTesting}
+            helperText={isAnyDeviceTesting ? '测试期间禁用输入' : ''}
           />
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setIsConnectionDialogOpen(false)}>取消</Button>
-          <Button onClick={handleCreateConnection} disabled={isLoading || testingState.isF1Testing || testingState.isF2Testing}>连接</Button>
+          <Button onClick={handleCreateConnection} disabled={isLoading || isAnyDeviceTesting}>连接</Button>
         </DialogActions>
       </Dialog>
 

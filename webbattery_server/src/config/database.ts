@@ -83,12 +83,6 @@ async function createTables(): Promise<void> {
       r_ohm INTEGER,
       r_sei INTEGER,
       r_ct INTEGER,
-      bat3_r1 INTEGER,
-      bat3_r2 INTEGER,
-      bat3_r3 INTEGER,
-      bat4_r1 INTEGER,
-      bat4_r2 INTEGER,
-      bat4_r3 INTEGER,
       voltage INTEGER,
       test_type INTEGER,
       dataready INTEGER DEFAULT 1,
@@ -104,18 +98,15 @@ async function createTables(): Promise<void> {
     // Column already exists, ignore error
   }
 
-  // Add new impedance columns if they don't exist
-  const newColumns = ['bat3_r1', 'bat3_r2', 'bat3_r3', 'bat4_r1', 'bat4_r2', 'bat4_r3'];
-  for (const col of newColumns) {
+  // GET_for_Tesla: Add raw_r2/raw_r3 columns for RAW data (JSON arrays)
+  for (const col of ['raw_r2', 'raw_r3']) {
     try {
-      await db.exec(`ALTER TABLE battery_data ADD COLUMN ${col} INTEGER`);
+      await db.exec(`ALTER TABLE battery_data ADD COLUMN ${col} TEXT`);
       console.log(`Added ${col} column to battery_data table`);
     } catch (error) {
       // Column already exists, ignore error
     }
   }
-
-
 
   // Create indexes for better performance
   await db.exec('CREATE INDEX IF NOT EXISTS idx_mac ON battery_data(mac)');
@@ -234,10 +225,6 @@ async function migrateDatabase(): Promise<void> {
         }
       }
     }
-    
-    // Clean up any old tables
-    await db.exec('DROP TABLE IF EXISTS client_connections');
-    
   } catch (error) {
     console.error('Error during database migration:', error);
     console.log('Continuing with fresh database setup...');

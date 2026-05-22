@@ -33,28 +33,34 @@ export const REGISTER_MAP = {
   STATUS_REGISTER: 0x0000,  // 状态寄存器
 
   // 控制寄存器
-  CONTROL_A: 0x0001,        // 控制寄存器A (F2测试/清除告警)
+  CONTROL_A: 0x0001,        // 控制寄存器A (强制停止0x0002/清除告警0x0004)
   CONTROL_B: 0x0002,        // 控制寄存器B (F1周期测试) - 与CONTROL_CYCLE相同
   CONTROL_CYCLE: 0x0002,    // 周期值写入 (启动周期测试)
 
-  // 数据寄存器 (0x0003-0x000C)
-  VOLTAGE: 0x0003,          // 电压 (mV)及阻抗倍率乘数(高三位为倍率，低13位为电压值)
-  BAT1_R1: 0x0004,          // 电池1阻抗 R1 (μΩ)
-  BAT1_R2: 0x0005,          // 电池1阻抗 R2 (μΩ)
-  BAT1_R3: 0x0006,          // 电池1阻抗 R3 (μΩ)
-  BAT3_R1: 0x0007,          // 电池3阻抗 R1 (μΩ)
-  BAT3_R2: 0x0008,          // 电池3阻抗 R2 (μΩ)
-  BAT3_R3: 0x0009,          // 电池3阻抗 R3 (μΩ)
-  BAT4_R1: 0x000A,          // 电池4阻抗 R1 (μΩ)
-  BAT4_R2: 0x000B,          // 电池4阻抗 R2 (μΩ)
-  BAT4_R3: 0x000C           // 电池4阻抗 R3 (μΩ)
+  // GET_for_Tesla 协议: 0x0003 为档位控制寄存器
+  GEAR_CTRL: 0x0003,        // 档位控制寄存器 (0.1mA步进, 写入值=电流mA*10, 范围1-624)
+
+  // 数据寄存器 (0x0004-0x0007)
+  UNIT_VOLT: 0x0004,        // 电压/阻值单位 (高3位为倍率索引, 低13位为电压mV)
+  BAT1_R1: 0x0005,          // 电池1阻抗 R1 (μΩ)
+  BAT1_R2: 0x0006,          // 电池1阻抗 R2 (μΩ)
+  BAT1_R3: 0x0007,          // 电池1阻抗 R3 (μΩ)
+
+  // RAW 内部数据寄存器 (单次测试时读取)
+  RAW_R2_START: 0x0100,     // RAW R2[0..31] 起始地址
+  RAW_R2_COUNT: 32,         // RAW R2 点数
+  RAW_R3_START: 0x0120,     // RAW R3[0..31] 起始地址
+  RAW_R3_COUNT: 32,         // RAW R3 点数
+
+  // 兼容旧代码的别名
+  VOLTAGE: 0x0004           // 向后兼容别名
 } as const;
 
 /**
  * F2 快速测试命令 (功能码 0x06)
  */
 export const F2_COMMANDS = {
-  START: 0x0001,           // 启动测试
+  // START: 0x0001,        // GET_for_Tesla: F2快速测试已移除
   STOP: 0x0000,            // 停止测试
   FORCE_STOP: 0x0002,      // 强制停止/复位
   CLEAR_STATUS: 0x0004     // 清除状态标志
@@ -78,6 +84,13 @@ export const STATUS_BITS = {
   ALARM_DEV_OV: 0x0000,
   ADDRESS_MASK: 0xFE00        // bit9-15: 地址寄存器
 } as const;
+
+/**
+ * 可被识别为“完整电池数据帧”的字节数（不含MBAP+FC+ByteCount，仅Data区）
+ * - 16字节: 0x0000~0x0007（8个寄存器，旧流程）
+ * - 26字节: 0x0000~0x000C（13个寄存器，GET_for_Tesla 周期测试流程）
+ */
+const COMPLETE_BATTERY_DATA_BYTES = new Set([16, 26]);
 
 /**
  * 构建 Modbus TCP 帧
@@ -466,17 +479,18 @@ export function buildF1CycleStopCommand(
  * @param unitId 单元ID
  * @returns Modbus TCP 帧
  */
-export function buildF2QuickStartCommand(
-  transactionId: number,
-  unitId: number
-): Buffer {
-  return buildWriteSingleRegisterRequest(
-    transactionId,
-    unitId,
-    REGISTER_MAP.CONTROL_A,
-    F2_COMMANDS.START
-  );
-}
+// GET_for_Tesla: F2 快速测试已移除，此函数不再使用
+// export function buildF2QuickStartCommand(
+//   transactionId: number,
+//   unitId: number
+// ): Buffer {
+//   return buildWriteSingleRegisterRequest(
+//     transactionId,
+//     unitId,
+//     REGISTER_MAP.CONTROL_A,
+//     F2_COMMANDS.START
+//   );
+// }
 
 /**
  * 构建F2快速测试清除状态命令
@@ -510,7 +524,7 @@ export function buildReadDataRegistersCommand(
     transactionId,
     unitId,
     REGISTER_MAP.STATUS_REGISTER,
-    13  // 读取13个寄存器: 0x0000-0x000C
+    8  // GET_for_Tesla: 读取8个寄存器: 0x0000-0x0007
   );
 }
 
@@ -592,11 +606,11 @@ export function parseRawModbusTCPFrame(rawFrame: Buffer): {
     // 使用实际可用的字节数，而不是期望的字节数
     const actualDataBytes = Math.min(byteCount, availableDataBytes);
 
-    // 读1个寄存器的标准响应（11字节）属于状态帧，不应按完整电池数据帧处理。
-    if (actualDataBytes === 2) {
+    // 读1个或3个寄存器的标准响应（属于状态帧探测），不应按完整电池数据帧处理。
+    if (actualDataBytes === 2 || actualDataBytes === 6) {
       const statusValue = processedFrame.readUInt16BE(9);
       const statusData = parseStatusRegister(statusValue);
-      const batteryData = {
+      const batteryData: any = {
         unitId,
         status: {
           value: statusValue,
@@ -604,7 +618,12 @@ export function parseRawModbusTCPFrame(rawFrame: Buffer): {
         }
       };
 
-      console.log(`状态寄存器响应帧: status=0x${statusValue.toString(16).toUpperCase().padStart(4, '0')}, measEnable=${statusData.measEnable ? 1 : 0}, testDone=${statusData.testDone ? 1 : 0}`);
+      if (actualDataBytes === 6) {
+        batteryData.controlRegisterA = processedFrame.readUInt16BE(11);
+        batteryData.controlRegisterB = processedFrame.readUInt16BE(13);
+      }
+
+      console.log(`状态/控制寄存器响应帧: status=0x${statusValue.toString(16).toUpperCase().padStart(4, '0')}, measEnable=${statusData.measEnable ? 1 : 0}, testDone=${statusData.testDone ? 1 : 0}`);
       return { isValid: true, batteryData, format, frameType: 'status-response' };
     }
 
@@ -626,7 +645,9 @@ export function parseRawModbusTCPFrame(rawFrame: Buffer): {
       batteryData.unitId = unitId; // 添加Modbus设备地址
     }
 
-    const frameType = actualDataBytes >= 26 ? 'data-response' : 'other-read-response';
+    const frameType = COMPLETE_BATTERY_DATA_BYTES.has(actualDataBytes)
+      ? 'data-response'
+      : 'other-read-response';
     return { isValid: true, batteryData, format, frameType };
 
   } catch (error) {
@@ -686,32 +707,20 @@ export function calculateActualImpedance(value: number, power: number = -6): num
 // 高位寄存器不再用于R1/R2/R3实际值拼接；保留低16位作为当前阻抗值
 
 /**
- * 解析电池数据 (新协议)
- * @param values 从寄存器读取的值数组 (0x0000-0x0005)
- * @returns 解析后的电池数据
- */
-/**
- * 解析电池数据 (GET3017 协议)
+ * 解析电池数据 (GET_for_Tesla 协议)
  * 寄存器映射：
  * 0x0000: 状态寄存器
  * 0x0001: 控制寄存器A
  * 0x0002: 控制寄存器B
- * 0x0003: 电压 (mV) + 阻抗倍率乘数
- * 0x0004-0x0006: Bat1 R1-R3
- * 0x0007-0x0009: Bat3 R1-R3
- * 0x000A-0x000C: Bat4 R1-R3
+ * 0x0003: 档位控制寄存器 (GEAR_CTRL)
+ * 0x0004: 电压/阻值单位 (高3位倍率, 低13位电压mV)
+ * 0x0005-0x0007: Bat1 R1-R3
  */
 export function parseBatteryData(values: number[]): {
   voltage?: number;      // 电压 (mV)
   r1?: { value: number; actual: number };  // R1阻抗 (μΩ)
   r2?: { value: number; actual: number };  // R2阻抗 (μΩ)
   r3?: { value: number; actual: number };  // R3阻抗 (μΩ)
-  bat3_r1?: { value: number; actual: number };
-  bat3_r2?: { value: number; actual: number };
-  bat3_r3?: { value: number; actual: number };
-  bat4_r1?: { value: number; actual: number };
-  bat4_r2?: { value: number; actual: number };
-  bat4_r3?: { value: number; actual: number };
   status?: {             // 状态寄存器
     value: number;
     dataReady: boolean;
@@ -731,6 +740,7 @@ export function parseBatteryData(values: number[]): {
   };
   controlRegisterA?: number; // 控制寄存器A
   controlRegisterB?: number; // 控制寄存器B
+  gearCtrl?: number;     // 档位控制寄存器值
   unitId?: number;       // Modbus设备地址
 } {
   const data: any = {};
@@ -757,43 +767,36 @@ export function parseBatteryData(values: number[]): {
     data.controlRegisterB = values[2];
   }
 
+  // 0x0003: 档位控制寄存器 (GET_for_Tesla: GEAR_CTRL)
+  if (values.length > 3) {
+    data.gearCtrl = values[3];
+  }
+
   let multiplier = 1;
 
-  // 0x0003: 电压 (mV)及阻抗倍率乘数
-  if (values.length > 3) {
-    const rawVal = values[3];
+  // 0x0004: 电压/阻值单位 (GET_for_Tesla: UNIT_VOLT)
+  if (values.length > 4) {
+    const rawVal = values[4];
     const voltage = rawVal & 0x1FFF; // 低13位
     const multiplierIndex = (rawVal >> 13) & 0x07; // 高3位
-    const multipliers = [1, 4, 8, 12, 16, 20, 24, 28];
+    const multipliers = [1, 2, 4, 8, 16, 32, 64, 128];
     multiplier = multipliers[multiplierIndex] || 1;
 
     data.voltage = voltage;
-    console.log(`0x0003 原始值: 0x${rawVal.toString(16)}, 电压: ${voltage}mV, 倍率: *${multiplier}`);
+    console.log(`0x0004 原始值: 0x${rawVal.toString(16)}, 电压: ${voltage}mV, 倍率: *${multiplier}`);
   }
 
   // 计算阻抗辅助函数
   const getImpedance = (raw: number) => ({ value: raw, actual: raw * multiplier });
 
-  // 0x0004-0x0006: Bat1 R1-R3
-  if (values.length > 6) {
-    data.r1 = getImpedance(values[4]);
-    data.r2 = getImpedance(values[5]);
-    data.r3 = getImpedance(values[6]);
+  // 0x0005-0x0007: Bat1 R1-R3 (GET_for_Tesla)
+  if (values.length > 7) {
+    data.r1 = getImpedance(values[5]);
+    data.r2 = getImpedance(values[6]);
+    data.r3 = getImpedance(values[7]);
   }
 
-  // 0x0007-0x0009: Bat3 R1-R3
-  if (values.length > 9) {
-    data.bat3_r1 = getImpedance(values[7]);
-    data.bat3_r2 = getImpedance(values[8]);
-    data.bat3_r3 = getImpedance(values[9]);
-  }
-
-  // 0x000A-0x000C: Bat4 R1-R3
-  if (values.length > 12) {
-    data.bat4_r1 = getImpedance(values[10]);
-    data.bat4_r2 = getImpedance(values[11]);
-    data.bat4_r3 = getImpedance(values[12]);
-  }
+  // GET_for_Tesla: Bat3/Bat4 已移除，不再解析
 
   return data;
 }

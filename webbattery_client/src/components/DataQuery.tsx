@@ -12,7 +12,7 @@ import {
   MenuItem
 } from '@mui/material';
 // 移除连接状态依赖，导出功能仅依赖数据库
- 
+
 
 interface QueryParams {
   ip?: string;
@@ -32,9 +32,9 @@ const DataQuery: React.FC<DataQueryProps> = ({ isVisible = true }) => {
   const [error, setError] = useState<string | null>(null);
   const [ipOptions, setIpOptions] = useState<string[]>([]);
   const [deviceAddressOptions, setDeviceAddressOptions] = useState<string[]>([]);
-  
-  
-  
+
+
+
 
   const handleExport = async (format: 'xlsx' = 'xlsx') => {
     try {
@@ -51,9 +51,9 @@ const DataQuery: React.FC<DataQueryProps> = ({ isVisible = true }) => {
       if (queryParams.deviceAddress) params.append('deviceAddress', queryParams.deviceAddress);
 
       const url = `/api/battery/export/ip?${params.toString()}`;
-      
+
       const response = await fetch(url);
-      
+
       if (response.ok) {
         const blob = await response.blob();
         const url = window.URL.createObjectURL(blob);
@@ -72,6 +72,43 @@ const DataQuery: React.FC<DataQueryProps> = ({ isVisible = true }) => {
     } catch (err) {
       setError('导出请求失败');
       console.error('导出失败:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleExportAllUids = async () => {
+    try {
+      if (!queryParams.ip) {
+        setError('缺少IP参数，请先选择IP地址');
+        return;
+      }
+
+      setLoading(true);
+      setError(null);
+      const params = new URLSearchParams();
+      params.append('ip', queryParams.ip);
+
+      const url = `/api/battery/export/all-uids?${params.toString()}`;
+      const response = await fetch(url);
+
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `battery_data_all_${queryParams.ip}_${new Date().toISOString().slice(0, 10)}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+      } else {
+        const result = await response.json();
+        setError(result.message || '导出ALL失败');
+      }
+    } catch (err) {
+      setError('导出ALL请求失败');
+      console.error('导出ALL失败:', err);
     } finally {
       setLoading(false);
     }
@@ -131,104 +168,121 @@ const DataQuery: React.FC<DataQueryProps> = ({ isVisible = true }) => {
     return () => { active = false; };
   }, [queryParams.ip]);
 
-  
 
-  
+
+
 
   return (
-      <Box sx={{ p: 3 }}>
-        <Typography variant="h5" gutterBottom>
-          数据导出
-        </Typography>
+    <Box sx={{ p: 3 }}>
+      <Typography variant="h5" gutterBottom>
+        数据导出
+      </Typography>
 
-        {/* 查询条件 */}
-        <Card sx={{ mb: 3 }}>
-          <CardContent>
-            <Typography variant="h6" gutterBottom>
-              导出条件
-            </Typography>
-            <Grid container spacing={2}>
-              
-              <Grid item xs={12} md={2.5}>
-                <TextField
-                  select
-                  fullWidth
-                  label="设备IP地址"
-                  value={queryParams.ip || ''}
-                  onChange={(e) => setQueryParams({ ...queryParams, ip: e.target.value, deviceAddress: '' })}
-                  // 不依赖测试/连接状态
-                  helperText={''}
-                >
-                  {ipOptions.length === 0 && (
-                    <MenuItem value="">
-                      <em>暂无IP数据</em>
-                    </MenuItem>
-                  )}
-                  {ipOptions.map((ip) => (
-                    <MenuItem key={ip} value={ip}>{ip}</MenuItem>
-                  ))}
-                </TextField>
-              </Grid>
-              
-              
-              <Grid item xs={12} md={2.0}>
-                <TextField
-                  select
-                  fullWidth
-                  label="设备地址"
-                  value={queryParams.deviceAddress || ''}
-                  onChange={(e) => setQueryParams({ ...queryParams, deviceAddress: e.target.value })}
-                  disabled={!queryParams.ip}
-                  helperText={!queryParams.ip ? '请选择IP后再选择设备地址' : ''}
-                >
-                  {/* 始终提供“全部设备”选项以导出该IP下所有记录 */}
+      {/* 查询条件 */}
+      <Card sx={{ mb: 3 }}>
+        <CardContent>
+          <Typography variant="h6" gutterBottom>
+            导出条件
+          </Typography>
+          <Grid container spacing={2}>
+
+            <Grid item xs={12} md={2.5}>
+              <TextField
+                select
+                fullWidth
+                label="设备IP地址"
+                value={queryParams.ip || ''}
+                onChange={(e) => setQueryParams({ ...queryParams, ip: e.target.value, deviceAddress: '' })}
+                // 不依赖测试/连接状态
+                helperText={''}
+              >
+                {ipOptions.length === 0 && (
                   <MenuItem value="">
-                    <em>全部设备</em>
+                    <em>暂无IP数据</em>
                   </MenuItem>
-                  {deviceAddressOptions.map((addr) => (
-                    <MenuItem key={addr} value={addr}>{String(addr)}</MenuItem>
-                  ))}
-                </TextField>
-              </Grid>
-              
+                )}
+                {ipOptions.map((ip) => (
+                  <MenuItem key={ip} value={ip}>{ip}</MenuItem>
+                ))}
+              </TextField>
             </Grid>
-          </CardContent>
-        </Card>
 
-        {/* 操作按钮 */}
-        <Box sx={{ mb: 3, display: 'flex', gap: 2, flexWrap: 'wrap' }}>
-          
-          <Button
-            variant="contained"
-            color="success"
-            onClick={() => handleExport('xlsx')}
-            disabled={loading || !queryParams.ip}
-          >
-            导出Excel (XLSX)
-          </Button>
-          
-        </Box>
 
-        
+            <Grid item xs={12} md={3.0}>
+              <TextField
+                select
+                fullWidth
+                label="设备地址"
+                value={queryParams.deviceAddress || ''}
+                onChange={(e) => setQueryParams({ ...queryParams, deviceAddress: e.target.value })}
+                disabled={!queryParams.ip}
+                helperText={!queryParams.ip ? '请选择IP后再选择设备地址' : ''}
+                InputLabelProps={{ shrink: true }}
+                SelectProps={{
+                  displayEmpty: true,
+                  renderValue: (value) => {
+                    if (!value) return <em>ALL IN ONE XLSX</em>;
+                    return value as React.ReactNode;
+                  }
+                }}
+              >
+                {/* 始终提供“全部设备”选项以导出该IP下所有记录 */}
+                <MenuItem value="">
+                  <em>ALL IN ONE XLSX</em>
+                </MenuItem>
+                {deviceAddressOptions.map((addr) => (
+                  <MenuItem key={addr} value={addr}>{String(addr)}</MenuItem>
+                ))}
+              </TextField>
+            </Grid>
 
-        {/* 错误提示 */}
-        {error && (
-          <Alert severity="error" sx={{ mb: 3 }}>
-            {error}
-          </Alert>
-        )}
+          </Grid>
+        </CardContent>
+      </Card>
 
-        {/* 加载指示器 */}
-        {loading && (
-          <Box sx={{ display: 'flex', justifyContent: 'center', mb: 3 }}>
-            <CircularProgress />
-          </Box>
-        )}
+      {/* 操作按钮 */}
+      <Box sx={{ mb: 3, display: 'flex', gap: 2, flexWrap: 'wrap' }}>
 
-        
+        <Button
+          variant="contained"
+          color="success"
+          onClick={() => handleExport('xlsx')}
+          disabled={loading || !queryParams.ip}
+        >
+          导出Excel (XLSX)
+        </Button>
 
-        
+        <Button
+          variant="contained"
+          color="info"
+          onClick={handleExportAllUids}
+          disabled={loading || !queryParams.ip}
+        >
+          导出ALL EXCEL(ZIP)
+        </Button>
+
       </Box>
+
+
+
+      {/* 错误提示 */}
+      {error && (
+        <Alert severity="error" sx={{ mb: 3 }}>
+          {error}
+        </Alert>
+      )}
+
+      {/* 加载指示器 */}
+      {loading && (
+        <Box sx={{ display: 'flex', justifyContent: 'center', mb: 3 }}>
+          <CircularProgress />
+        </Box>
+      )}
+
+
+
+
+    </Box>
   );
 };
 

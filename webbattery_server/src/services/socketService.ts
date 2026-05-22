@@ -21,6 +21,7 @@ import {
   startF1CyclicTest,
   startF2FastPolling,
   startF1CyclicPolling,
+  startSingleTest,
   stopPolling,
   stopTest,
   stopCyclicTest,
@@ -34,7 +35,7 @@ import {
 import { COMMAND_MAP, STATUS_BITS } from '../utils/modbusFrameUtils';
 
 const DEVICE_UNIT_MIN = 1;
-const DEVICE_UNIT_MAX = 128;
+const DEVICE_UNIT_MAX = 12;  // GET_for_Tesla: 每IP最多12个设备
 
 // Store connected clients
 const connectedClients = new Map<string, ClientConnection>();
@@ -246,7 +247,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
               console.log('周期测试模式且DATA_READY位为0，跳过测试数据广播');
             }
           } else {
-            console.log('⚠️ 状态寄存器未定义，跳过测试数据广播');
+            console.log('状态寄存器未定义，跳过测试数据广播');
           }
 
           console.log('测试数据已处理并广播');
@@ -455,7 +456,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
     });
 
     // Handle F1 cyclic test request
-    socket.on('startF1CyclicTest', async (data: { connectionId: string, periodSeconds?: number }) => {
+    socket.on('startF1CyclicTest', async (data: { connectionId: string, periodSeconds?: number, gearValue?: number }) => {
       try {
         const { connectionId, periodSeconds = 3 } = data; // 默认3秒间隔
         console.log(`启动F1周期测试: ${connectionId}, 周期: ${periodSeconds}秒`);
@@ -483,7 +484,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
         console.log(`🚀 直接启动F1轮询 ${connectionId}: 周期=${periodSeconds}秒`);
 
         // 启动F1轮询（包含写命令发送和立即开始轮询读取）
-        const pollingStarted = await startF1CyclicPolling(connectionId, periodSeconds, undefined, 0x0001);
+        const pollingStarted = await startF1CyclicPolling(connectionId, periodSeconds, undefined, 0x0001, data.gearValue);
 
         if (pollingStarted) {
           console.log(`F1周期轮询已启动 ${connectionId}: 周期=${periodSeconds}秒`);
@@ -512,17 +513,26 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
     });
 
     // Handle F2 fast test request
-    socket.on('startF2FastTest', async (data: { connectionId: string, targetUnitId?: number }) => {
+    socket.on('startF2FastTest', async (data: { connectionId: string, targetUnitId?: number, selectedDevices?: string[] }) => {
       try {
-        const { connectionId, targetUnitId } = data;
+        const { connectionId, targetUnitId, selectedDevices } = data;
 
         // 获取连接信息以确定设备ID
         const connections = getModbusConnections();
         const connection = connections.find(c => c.id === connectionId);
-        // 优先使用传入的targetUnitId，其次使用连接的deviceId，最后默认为1
-        const rawUnitId = targetUnitId ?? connection?.deviceId ?? DEVICE_UNIT_MIN;
-        const unitId = Number(rawUnitId);
-        if (!Number.isInteger(unitId) || unitId < DEVICE_UNIT_MIN || unitId > DEVICE_UNIT_MAX) {
+
+        let unitIds: number[] = [];
+        if (selectedDevices && selectedDevices.length > 0) {
+          unitIds = selectedDevices.map(id => Number(id));
+        } else if (targetUnitId !== undefined) {
+          unitIds = [targetUnitId];
+        } else {
+          unitIds = [connection?.deviceId ?? DEVICE_UNIT_MIN];
+        }
+
+        const validUnitIds = unitIds.filter(id => Number.isInteger(id) && id >= DEVICE_UNIT_MIN && id <= DEVICE_UNIT_MAX);
+
+        if (validUnitIds.length === 0) {
           socket.emit('startF2FastTestResponse', {
             success: false,
             connectionId,
@@ -532,7 +542,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
           return;
         }
 
-        console.log(`启动F2快速测试: ${connectionId}, UnitID=${unitId}`);
+        console.log(`启动F2快速测试: ${connectionId}, UnitIDs=${validUnitIds.join(',')}`);
 
         // 检查设备连接状态
         const activeConnections = connections.filter(conn => conn.isConnected);
@@ -551,7 +561,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
           return;
         }
 
-        const result = await startF2FastPolling(connectionId, unitId);
+        const result = await startF2FastPolling(connectionId, validUnitIds);
 
         socket.emit('startF2FastTestResponse', {
           success: result,
@@ -565,6 +575,50 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
           success: false,
           connectionId: data.connectionId,
           message: `启动F2快速测试失败: ${error}`,
+          timestamp: new Date().toISOString()
+        });
+      }
+    });
+
+    // Handle single test request (GET_for_Tesla)
+    socket.on('startSingleTest', async (data: { connectionId: string, gearValue: number, selectedDevices?: string[] }) => {
+      try {
+        const { connectionId, gearValue, selectedDevices } = data;
+        const connections = getModbusConnections();
+        const connection = connections.find(c => c.id === connectionId);
+
+        let unitIds: number[] = [];
+        if (selectedDevices && selectedDevices.length > 0) {
+          unitIds = selectedDevices.map(Number).filter(id => Number.isInteger(id) && id >= DEVICE_UNIT_MIN && id <= DEVICE_UNIT_MAX);
+        } else {
+          unitIds = [connection?.deviceId ?? DEVICE_UNIT_MIN];
+        }
+
+        if (unitIds.length === 0) {
+          socket.emit('startSingleTestResponse', { success: false, message: `目标设备地址必须是 ${DEVICE_UNIT_MIN}-${DEVICE_UNIT_MAX} 的整数` });
+          return;
+        }
+
+        // 验证档位值 (1-624)
+        const gear = Number(gearValue);
+        if (!Number.isInteger(gear) || gear < 1 || gear > 624) {
+          socket.emit('startSingleTestResponse', { success: false, message: `档位值必须是 1-624 的整数 (对应 0.1-62.4mA)` });
+          return;
+        }
+
+        console.log(`启动单次测试: conn=${connectionId}, units=[${unitIds.join(',')}], gear=${gear}`);
+        const result = await startSingleTest(connectionId, unitIds, gear);
+
+        socket.emit('startSingleTestResponse', {
+          success: result,
+          connectionId,
+          message: result ? '单次测试已启动' : '单次测试启动失败',
+          timestamp: new Date().toISOString()
+        });
+      } catch (error) {
+        socket.emit('startSingleTestResponse', {
+          success: false,
+          message: `单次测试失败: ${error}`,
           timestamp: new Date().toISOString()
         });
       }
@@ -988,7 +1042,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
         return;
       }
 
-      // 读1个寄存器(11字节)的状态响应帧单独处理，不走电池数据保存流程。
+      // 读1个或3个寄存器的状态响应帧单独处理，不走电池数据保存流程。
       if (parseResult.frameType === 'status-response') {
         const unitId = batteryData.unitId || connection.deviceId || 1;
         const status = batteryData.status as any;
@@ -999,6 +1053,18 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
         if (typeof statusRegisterValue === 'number') {
           const statusMac = `${connection.host}_${unitId.toString().padStart(2, '0')}`;
 
+          // 获取当前轮询状态
+          const { getPollingStatus, clearF1Strike } = await import('./pollingService');
+          const pollingStatus = getPollingStatus();
+          const currentPolling = pollingStatus.find(p => p.connectionId === connection.id);
+          const isF1 = currentPolling && currentPolling.type === 'F1';
+
+          if (isF1) {
+            // 清除F1掉线计数
+            clearF1Strike(unitId);
+            return;
+          }
+
           io.emit('registerStatusUpdate', {
             deviceNumber: unitId,
             mac: statusMac,
@@ -1006,9 +1072,12 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
             unitId,
             deviceAddress: unitId,
             statusRegister: statusRegisterValue,
+            controlRegisterA: batteryData.controlRegisterA || 0,
+            controlRegisterB: batteryData.controlRegisterB || 0,
             statusBits: {
               measEnable: !!status?.measEnable,
               testDone: !!status?.testDone,
+              dataReady: (statusRegisterValue & STATUS_BITS.DATA_READY) !== 0,
               rawValue: statusRegisterValue,
               binaryString: statusRegisterValue.toString(2).padStart(16, '0')
             },
@@ -1016,8 +1085,6 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
             isRegisterUpdate: true,
             responseType: 'status-only'
           });
-
-          console.log(`状态寄存器响应已处理: conn=${data.connectionId}, unit=${unitId}, status=0x${statusRegisterValue.toString(16).toUpperCase().padStart(4, '0')}`);
         }
 
         return;
@@ -1036,7 +1103,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
       }
 
       // 额外检查：如果没有任何阻抗数据，也跳过
-      if (!batteryData.r1 && !batteryData.r2 && !batteryData.r3 && !batteryData.bat3_r1 && !batteryData.bat4_r1) {
+      if (!batteryData.r1 && !batteryData.r2 && !batteryData.r3) {
         console.log(' 跳过无阻抗数据');
         return;
       }
@@ -1108,14 +1175,6 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
         rSei: batteryData.r2?.actual || 0,
         rCt: batteryData.r3?.actual || 0,
 
-        // 新增电池数据
-        bat3_r1: batteryData.bat3_r1,
-        bat3_r2: batteryData.bat3_r2,
-        bat3_r3: batteryData.bat3_r3,
-        bat4_r1: batteryData.bat4_r1,
-        bat4_r2: batteryData.bat4_r2,
-        bat4_r3: batteryData.bat4_r3,
-
         testType: testType, // 使用自动判断的测试类型
         timestamp: new Date().toISOString()
       };
@@ -1146,6 +1205,7 @@ export const initializeSocketServer = (io: SocketIOServer): void => {
           statusRegister: statusRegisterValue,
           controlRegisterA: (batteryData as any).controlRegisterA,
           controlRegisterB: (batteryData as any).controlRegisterB,
+          gearValue: (batteryData as any).gearCtrl,
           r1: (batteryData as any).r1?.value,
           r2: (batteryData as any).r2?.value,
           timestamp: processedBatteryData.timestamp,

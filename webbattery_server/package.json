@@ -7,6 +7,7 @@
     "start": "node dist/index.js",
     "dev": "nodemon --watch src --exec ts-node src/index.ts",
     "build": "tsc",
+    "mock": "ts-node src/mock/mockModbusServer.ts",
     "test": "echo \"Error: no test specified\" && exit 1",
     "pkg-build": "npm run build && pkg .",
     "nexe-build": "npm run build && nexe dist/index.js -o ../build/webbattery_server.exe -t windows-x64-16.16.0 --verbose"
@@ -30,6 +31,7 @@
     ]
   },
   "dependencies": {
+    "adm-zip": "^0.5.17",
     "axios": "^1.10.0",
     "express": "^4.18.2",
     "modbus-serial": "^8.0.16",
@@ -41,6 +43,7 @@
   },
   "devDependencies": {
     "@angablue/exe": "^3.2.5",
+    "@types/adm-zip": "^0.5.8",
     "@types/express": "^4.17.21",
     "@types/node": "^20.10.0",
     "@types/socket.io": "^3.0.2",

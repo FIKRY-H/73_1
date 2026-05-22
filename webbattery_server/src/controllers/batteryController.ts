@@ -216,7 +216,21 @@ export const exportDataByIpController = async (req: Request, res: Response) => {
     const deviceAddrText = deviceAddrTextRaw ? deviceAddrTextRaw.padStart(2, '0') : undefined;
 
     if (exportFormat === 'xlsx') {
-      exportData = await exportDataToExcelByIp(ip, deviceAddrText);
+      // 获取单次测试结果用于导出
+      let singleTestData: Record<string, any[]> | undefined;
+      try {
+        const { singleTestResults } = await import('../services/pollingService');
+        if (singleTestResults.size > 0) {
+          singleTestData = {};
+          singleTestResults.forEach((val, key) => {
+            singleTestData![key] = val;
+          });
+        }
+      } catch (e) {
+        console.error('[Export] 获取单次测试结果失败:', e);
+      }
+
+      exportData = await exportDataToExcelByIp(ip, deviceAddrText, singleTestData);
       filename = deviceAddrText
         ? `battery_data_${ip}_${deviceAddrText}.xlsx`
         : `battery_data_${ip}.xlsx`;
@@ -250,6 +264,31 @@ export const exportDataByIpController = async (req: Request, res: Response) => {
     res.status(500).json({
       success: false,
       message: error instanceof Error ? error.message : '导出数据失败'
+    });
+  }
+};
+
+// 按IP导出全部12个UID的独立xlsx文件，打包为ZIP
+export const exportAllUidsController = async (req: Request, res: Response) => {
+  try {
+    const { ip } = req.query as { ip?: string };
+    if (!ip) {
+      return res.status(400).json({ success: false, message: '缺少IP参数' });
+    }
+
+    const { exportAllUidsZip } = await import('../services/batteryService');
+    const zipBuffer = await exportAllUidsZip(ip);
+
+    const dateStr = new Date().toISOString().slice(0, 10);
+    const filename = `battery_data_all_${ip}_${dateStr}.zip`;
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+    res.send(zipBuffer);
+  } catch (error) {
+    console.error('导出全部UID ZIP失败:', error);
+    res.status(500).json({
+      success: false,
+      message: error instanceof Error ? error.message : '导出全部UID ZIP失败'
     });
   }
 };

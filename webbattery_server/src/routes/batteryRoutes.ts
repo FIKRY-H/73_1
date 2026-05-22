@@ -2,6 +2,7 @@ import express from 'express';
 import {
   sendCommand as sendCommandController,
   exportDataByIpController,
+  exportAllUidsController,
   getIpListController,
   getDeviceAddressesByIpController,
   getDeviceMappingsController,
@@ -15,6 +16,9 @@ const router = express.Router();
 // 新导出：按IP导出（可选设备号）
 router.get('/export/ip', exportDataByIpController);
 router.get('/export/ip-device', exportDataByIpController);
+
+// 按IP导出全部12个UID的独立xlsx文件，打包为ZIP
+router.get('/export/all-uids', exportAllUidsController);
 
 // 下拉筛选数据源
 router.get('/ips', getIpListController);

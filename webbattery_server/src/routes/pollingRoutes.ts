@@ -17,7 +17,8 @@ import {
   stopAllPollingController,
   getPollingStatusController,
   startBatchPollingController,
-  scanDevicesController
+  scanDevicesController,
+  startSingleTestController
 } from '../controllers/pollingController';
 
 const router = Router();
@@ -29,6 +30,7 @@ router.get('/devices/data/:deviceId', getDeviceDataController);
 // 新协议测试控制路由
 router.post('/devices/test/f1-cyclic', startF1CyclicTestController);
 // router.post('/devices/test/f2-fast', startF2FastTestController); // 快速测试已下线
+router.post('/devices/test/single-test', startSingleTestController); // GET_for_Tesla: 单次测试
 router.post('/devices/test/stop', stopTestController);
 router.post('/devices/test/stop-cyclic', stopCyclicTestController);
 // 删除clearStatusAlarm路由，不再需要处理状态寄存器与控制寄存器

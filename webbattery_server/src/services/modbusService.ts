@@ -244,9 +244,9 @@ export const createModbusClient = async (host: string, port: number, deviceId: n
         const deviceCount = activeConnections.length;
 
         // 删除寄存器监控启动代码，不再需要处理状态寄存器与控制寄存器
-        console.log(`✅ 设备连接成功: ${connectionId} (设备数量: ${deviceCount})`);
+        console.log(`设备连接成功: ${connectionId} (设备数量: ${deviceCount})`);
       } catch (error) {
-        console.warn(`⚠️ 设备连接处理失败: ${connectionId}`, error);
+        console.warn(`设备连接处理失败: ${connectionId}`, error);
       }
 
       resolve(connectionId);
@@ -383,9 +383,9 @@ const sendCommandDirect = async (connectionId: string, command: Buffer): Promise
     console.log(`发送命令到 ${connectionId}: ${command.toString('hex')}`);
     connection.socket.write(command);
     connection.lastActivity = new Date();
-    console.log(`✅ 命令已发送到 ${connectionId}，数据将通过事件异步返回`);
+    console.log(`命令已发送到 ${connectionId}，数据将通过事件异步返回`);
   } catch (error) {
-    console.error(`❌ 发送命令失败 ${connectionId}:`, error);
+    console.error(`发送命令失败 ${connectionId}:`, error);
     throw error;
   }
 };
@@ -401,9 +401,9 @@ const sendWriteCommandDirect = async (connectionId: string, command: Buffer): Pr
     console.log(`发送写命令到 ${connectionId}: ${command.toString('hex')}`);
     connection.socket.write(command);
     connection.lastActivity = new Date();
-    console.log(`✅ 写命令已发送到 ${connectionId}，无需等待响应`);
+    console.log(`写命令已发送到 ${connectionId}，无需等待响应`);
   } catch (error) {
-    console.error(`❌ 发送写命令失败 ${connectionId}:`, error);
+    console.error(`发送写命令失败 ${connectionId}:`, error);
     throw error;
   }
 };
@@ -429,9 +429,9 @@ const sendReadCommandDirect = async (connectionId: string, command: Buffer): Pro
     console.log(`发送读命令到 ${connectionId}: ${command.toString('hex')}`);
     connection.socket.write(command);
     connection.lastActivity = new Date();
-    console.log(`✅ 读命令已发送到 ${connectionId}，数据将通过事件异步返回`);
+    console.log(`读命令已发送到 ${connectionId}，数据将通过事件异步返回`);
   } catch (error) {
-    console.error(`❌ 发送读命令失败 ${connectionId}:`, error);
+    console.error(`发送读命令失败 ${connectionId}:`, error);
     throw error;
   }
 };
@@ -488,7 +488,7 @@ export const readInputRegisters = async (connectionId: string, address: number, 
   frame.writeUInt16BE(address, offset); offset += 2;
   frame.writeUInt16BE(quantity, offset); offset += 2;
 
-  console.log(`📤 读输入寄存器 ${connectionId}: 地址=0x${address.toString(16).padStart(4, '0')}, 数量=${quantity}`);
+  console.log(`读输入寄存器 ${connectionId}: 地址=0x${address.toString(16).padStart(4, '0')}, 数量=${quantity}`);
   return sendCommand(connectionId, frame);
 };
 
@@ -520,7 +520,7 @@ export const readInputRegistersOneWay = async (connectionId: string, address: nu
   frame.writeUInt16BE(address, offset); offset += 2;
   frame.writeUInt16BE(quantity, offset); offset += 2;
 
-  console.log(`📤 读输入寄存器 ${connectionId}: 地址=0x${address.toString(16).padStart(4, '0')}, 数量=${quantity}`);
+  console.log(`读输入寄存器 ${connectionId}: 地址=0x${address.toString(16).padStart(4, '0')}, 数量=${quantity}`);
   return sendReadCommand(connectionId, frame);
 };
 
@@ -591,6 +591,8 @@ export const readHoldingRegistersOneWay = async (connectionId: string, address: 
   return sendReadCommand(connectionId, frame);
 };
 
+
+
 // 发送命令并等待响应（带超时）
 const sendCommandAndWaitResponse = (connectionId: string, command: Buffer, transactionId: number, timeoutMs: number): Promise<boolean> => {
   return enqueueCommand(connectionId, () => {
@@ -628,7 +630,7 @@ const sendCommandAndWaitResponse = (connectionId: string, command: Buffer, trans
         if (!isResolved) {
           isResolved = true;
           cleanup();
-          // console.log(`⚠️ 等待响应超时 ${connectionId}: TxID=0x${transactionId.toString(16)}`);
+          // console.log(`等待响应超时 ${connectionId}: TxID=0x${transactionId.toString(16)}`);
           resolve(false);
         }
       }, timeoutMs);
@@ -678,7 +680,7 @@ export const readHoldingRegistersPolling = async (connectionId: string, register
       frame.writeUInt16BE(registerAddress, offset); offset += 2;
       frame.writeUInt16BE(quantity, offset); offset += 2;
 
-      console.log(`📤 轮询读取 ${connectionId}: UnitID=0x${unitId.toString(16).padStart(2, '0')}, TxID=0x${transactionId.toString(16)}`);
+      console.log(`轮询读取 ${connectionId}: UnitID=0x${unitId.toString(16).padStart(2, '0')}, TxID=0x${transactionId.toString(16)}`);
 
       // 使用200ms超时等待响应
       // 接收到响应或超时后，立即继续下一个
@@ -692,7 +694,14 @@ export const readHoldingRegistersPolling = async (connectionId: string, register
 };
 
 // 使用固定Transaction ID读取保持寄存器并返回数据
-export const readHoldingRegistersWithFixedTxId = async (connectionId: string, transactionId: number, address: number, quantity: number, targetUnitId?: number): Promise<Buffer | null> => {
+export const readHoldingRegistersWithFixedTxId = async (
+  connectionId: string,
+  transactionId: number,
+  address: number,
+  quantity: number,
+  targetUnitId?: number,
+  timeoutMs: number = 50
+): Promise<Buffer | null> => {
   const connection = connections.get(connectionId);
   if (!connection) {
     console.error(`未找到Modbus连接: ${connectionId}`);
@@ -724,11 +733,8 @@ export const readHoldingRegistersWithFixedTxId = async (connectionId: string, tr
   frame.writeUInt16BE(quantity, offset); offset += 2;
 
   const frameHex = frame.toString('hex').toUpperCase().match(/.{1,2}/g)?.join(' ') || frame.toString('hex').toUpperCase();
-  const expectedResponseLengthField = 3 + quantity * 2; // UnitID + FC + ByteCount + Data
-  const expectedResponseBytes = 6 + expectedResponseLengthField;
   console.log(`读保持寄存器(固定TxID) ${connectionId}: TxID=0x${transactionId.toString(16).padStart(4, '0')}, UnitID=${unitId}, 地址=0x${address.toString(16).padStart(4, '0')}, 数量=${quantity}`);
   console.log(`发送读命令帧 ${connectionId}: ${frameHex}`);
-  console.log(`协议长度预期 ${connectionId}: FC03读取${quantity}寄存器，请求=12字节(Length=6)，响应=${expectedResponseBytes}字节(Length=${expectedResponseLengthField})`);
 
   // 发送命令并等待响应
   return enqueueCommand(connectionId, () => {
@@ -778,7 +784,7 @@ export const readHoldingRegistersWithFixedTxId = async (connectionId: string, tr
 
       modbusEvents.on('dataReceived', responseHandler);
 
-      // 250ms 超时
+      // 读取超时可配置，默认50ms
       timer = setTimeout(() => {
         if (!isResolved) {
           isResolved = true;
@@ -786,7 +792,7 @@ export const readHoldingRegistersWithFixedTxId = async (connectionId: string, tr
           // console.log(`读响应超时 ${connectionId}: TxID=0x${transactionId.toString(16)}`);
           resolve(null);
         }
-      }, 250);
+      }, timeoutMs);
 
       try {
         connection.socket.write(frame);
@@ -831,7 +837,7 @@ export const writeSingleRegister = async (connectionId: string, address: number,
   frame.writeUInt16BE(address, offset); offset += 2;
   frame.writeUInt16BE(value, offset); offset += 2;
 
-  console.log(`📤 写单个寄存器 ${connectionId}: 广播地址=0xFF, 寄存器地址=0x${address.toString(16).padStart(4, '0')}, 值=0x${value.toString(16).padStart(4, '0')}`);
+  console.log(`写单个寄存器 ${connectionId}: 广播地址=0xFF, 寄存器地址=0x${address.toString(16).padStart(4, '0')}, 值=0x${value.toString(16).padStart(4, '0')}`);
   return sendWriteCommand(connectionId, frame);
 };
 
@@ -854,7 +860,7 @@ export const writeSingleRegisterWithFixedTxId = async (
     throw new Error(`连接未建立: ${connectionId}`);
   }
 
-  console.log(`📤 Modbus写命令详情 ${connectionId}: TxID=0x${transactionId.toString(16).padStart(4, '0')}, UnitID=${targetUnitId}, 功能码=0x06, 寄存器=0x${address.toString(16).padStart(4, '0')}, 值=0x${value.toString(16).padStart(4, '0')}`);
+  console.log(`Modbus写命令详情 ${connectionId}: TxID=0x${transactionId.toString(16).padStart(4, '0')}, UnitID=${targetUnitId}, 功能码=0x06, 寄存器=0x${address.toString(16).padStart(4, '0')}, 值=0x${value.toString(16).padStart(4, '0')}`);
 
   // 构建Modbus TCP写入单个寄存器命令，使用固定Transaction ID
   const protocolId = 0x0000;
@@ -876,14 +882,107 @@ export const writeSingleRegisterWithFixedTxId = async (
   frame.writeUInt16BE(address, offset); offset += 2;
   frame.writeUInt16BE(value, offset); offset += 2;
 
-  console.log(`📡 发送Modbus帧 ${connectionId}: ${frame.toString('hex').toUpperCase()}`);
+  console.log(`发送Modbus帧 ${connectionId}: ${frame.toString('hex').toUpperCase()}`);
 
   await sendWriteCommand(connectionId, frame);
 
-  console.log(`✅ Modbus写命令已发送 ${connectionId}，无需等待响应`);
+  console.log(`Modbus写命令已发送 ${connectionId}，无需等待响应`);
 };
 
-// 写入多个寄存器（单向发送，不等待响应）
+// 使用固定Transaction ID写入单个寄存器并等待响应（用于快速探测）
+export const writeSingleRegisterWithFixedTxIdAndResponse = async (
+  connectionId: string,
+  transactionId: number,
+  address: number,
+  value: number,
+  targetUnitId: number,
+  timeoutMs: number = 50
+): Promise<boolean> => {
+  const connection = connections.get(connectionId);
+  if (!connection || !connection.isConnected) {
+    return false;
+  }
+
+  const protocolId = 0x0000;
+  const length = 6;
+  const functionCode = 0x06;
+
+  const frame = Buffer.alloc(12);
+  let offset = 0;
+  frame.writeUInt16BE(transactionId, offset); offset += 2;
+  frame.writeUInt16BE(protocolId, offset); offset += 2;
+  frame.writeUInt16BE(length, offset); offset += 2;
+  frame.writeUInt8(targetUnitId, offset); offset += 1;
+  frame.writeUInt8(functionCode, offset); offset += 1;
+  frame.writeUInt16BE(address, offset); offset += 2;
+  frame.writeUInt16BE(value, offset); offset += 2;
+  console.log(`发送Modbus帧 ${connectionId}: ${frame.toString('hex').toUpperCase()}`);
+
+  return enqueueCommand(connectionId, () => {
+    return new Promise<boolean>((resolve) => {
+      let isResolved = false;
+      let timer: NodeJS.Timeout;
+
+      const cleanup = () => {
+        if (timer) clearTimeout(timer);
+        modbusEvents.off('dataReceived', responseHandler);
+      };
+
+      const responseHandler = (connId: string, data: Buffer) => {
+        if (connId !== connectionId || isResolved || data.length < 12) {
+          return;
+        }
+
+        const recvTxId = data.readUInt16BE(0);
+        if (recvTxId !== transactionId) {
+          return;
+        }
+
+        const recvUnitId = data.readUInt8(6);
+        const recvFc = data.readUInt8(7);
+
+        // 0x06正常响应应回显地址和值
+        if (recvFc === 0x06 && recvUnitId === targetUnitId) {
+          const recvAddress = data.readUInt16BE(8);
+          const recvValue = data.readUInt16BE(10);
+          isResolved = true;
+          cleanup();
+          resolve(recvAddress === address && recvValue === value);
+          return;
+        }
+
+        // 0x86为异常响应，判定为离线/失败
+        if (recvFc === 0x86) {
+          isResolved = true;
+          cleanup();
+          resolve(false);
+        }
+      };
+
+      modbusEvents.on('dataReceived', responseHandler);
+
+      timer = setTimeout(() => {
+        if (!isResolved) {
+          isResolved = true;
+          cleanup();
+          resolve(false);
+        }
+      }, timeoutMs);
+
+      try {
+        connection.socket.write(frame);
+        connection.lastActivity = new Date();
+      } catch (error) {
+        if (!isResolved) {
+          isResolved = true;
+          cleanup();
+          resolve(false);
+        }
+      }
+    });
+  });
+};
+
 export const writeMultipleRegisters = async (connectionId: string, address: number, values: number[]): Promise<void> => {
   const connection = connections.get(connectionId);
   if (!connection || !connection.isConnected) {
@@ -920,7 +1019,7 @@ export const writeMultipleRegisters = async (connectionId: string, address: numb
     offset += 2;
   }
 
-  console.log(`📤 写多个寄存器 ${connectionId}: 广播地址=0xFF, 寄存器地址=0x${address.toString(16).padStart(4, '0')}, 数量=${quantity}, 值=[${values.map(v => '0x' + v.toString(16).padStart(4, '0')).join(', ')}]`);
+  console.log(`写多个寄存器 ${connectionId}: 广播地址=0xFF, 寄存器地址=0x${address.toString(16).padStart(4, '0')}, 数量=${quantity}, 值=[${values.map(v => '0x' + v.toString(16).padStart(4, '0')).join(', ')}]`);
   return sendWriteCommand(connectionId, frame);
 };
 

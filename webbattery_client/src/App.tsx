@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Box, Container, AppBar, Toolbar, Typography, Tabs, Tab } from '@mui/material';
+import { Box, Container, Tabs, Tab } from '@mui/material';
 import DataDisplay from './components/DataDisplay';
 // Settings组件已移除
 import ConnectionStatus from './components/ConnectionStatus';
@@ -52,22 +52,6 @@ function App() {
     <SocketProvider>
       <BatteryDataProvider>
         <Box sx={{ flexGrow: 1 }}>
-          <AppBar position="static">
-            <Toolbar>
-              <img 
-                src="/favicon.ico" 
-                alt="WebBattery Logo" 
-                style={{ 
-                  width: 32, 
-                  height: 32, 
-                  marginRight: 16 
-                }} 
-              />
-              <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
-                绿耳电池阻抗测试上位机485
-              </Typography>
-            </Toolbar>
-          </AppBar>
           <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
             <Tabs value={tabValue} onChange={handleTabChange} aria-label="基本选项卡示例">
               <Tab label="数据监控与Modbus管理" />
@@ -88,7 +72,7 @@ function App() {
           </Container>
         </Box>
       </BatteryDataProvider>
-    </SocketProvider>
+    </SocketProvider >
   );
 }
 

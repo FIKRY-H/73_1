@@ -30,16 +30,6 @@ export interface BatteryData {
   // 控制寄存器
   controlA?: number;
   controlB?: number;
-  
-  // 电池3阻抗
-  bat3_r1?: { value: number; power: number; actual: number };
-  bat3_r2?: { value: number; power: number; actual: number };
-  bat3_r3?: { value: number; power: number; actual: number };
-  
-  // 电池4阻抗
-  bat4_r1?: { value: number; power: number; actual: number };
-  bat4_r2?: { value: number; power: number; actual: number };
-  bat4_r3?: { value: number; power: number; actual: number };
 
   rOhm?: number;
   rSei?: number;
